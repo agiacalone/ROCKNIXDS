@@ -809,6 +809,11 @@ the top panel, the bottom panel, and an unused third.
     rounded backdrops so they stay readable over a light slide (SCREENSAVER SETTINGS > TEXT BACKDROP, on by default).
     While the screensaver runs, `device/screensaver-panel.sh` (ES's screensaver-start/-stop and wake scripts) turns
     the bottom panel's backlight off, and back on after. A one-panel layout (any other theme) is unchanged.
+  - `es-rgds-slideshow-wake.patch`: the slideshow screensaver drew a whole frame every 100 ms between slides, to
+    update its clock (or, without the clock, to poll for lightguns). It now wakes when the clock's text next changes
+    (each second with seconds in the time format, each minute without) or for the next slide, and without the clock
+    only for the next slide. RG DS Plus, slideshow with SHOW DATE TIME on: ES 14% -> 4% of a core, battery
+    ~525 -> ~498 mA.
 - **Other themes** (since 1.4): a theme with a layout for the dual-screen canvas spans both panels, like
   ROCKNIXDS's own. A theme has one when its `theme.xml` includes a layout for the canvas's 4:1 shape
   (`if="{screen.ratio} == '4/1'"`), as [TechDweeb's theme](https://github.com/anthonycaccese/techdweeb-es) does.
