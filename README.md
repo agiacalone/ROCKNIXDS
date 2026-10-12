@@ -781,6 +781,13 @@ the top panel, the bottom panel, and an unused third.
     closes under the screensaver too.
     The theme's looping animations now stop after a few cycles. Idle menu: ~101% -> ~13% CPU (of 400), average clock
     ~1390 -> ~530 MHz, GPU at its lowest clock.
+  - `es-rgds-screensaver.patch`: the screensaver on the top panel. Stock ES sized it against the whole three-panel
+    canvas: a slide was centred on the bottom panel, a slide wider than 4:3 or a long game name ran onto the other
+    screens, and SHOW DATE TIME put the clock in the canvas' top-left corner, on the top screen. The slide, its names
+    or marquee, a decoration and the clock now all sit inside the top panel and the bottom screen stays black, so a
+    device propped open shows the slideshow and the time like a desk clock. The clock and the game's name get soft
+    rounded backdrops so they stay readable over a light slide (SCREENSAVER SETTINGS > TEXT BACKDROP, on by default).
+    A one-panel layout (any other theme) is unchanged.
 - **Other themes** (since 1.4): a theme with a layout for the dual-screen canvas spans both panels, like
   ROCKNIXDS's own. A theme has one when its `theme.xml` includes a layout for the canvas's 4:1 shape
   (`if="{screen.ratio} == '4/1'"`), as [TechDweeb's theme](https://github.com/anthonycaccese/techdweeb-es) does.
