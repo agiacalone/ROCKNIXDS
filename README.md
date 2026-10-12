@@ -807,7 +807,8 @@ the top panel, the bottom panel, and an unused third.
     or marquee, a decoration and the clock now all sit inside the top panel and the bottom screen stays black, so a
     device propped open shows the slideshow and the time like a desk clock. The clock and the game's name get soft
     rounded backdrops so they stay readable over a light slide (SCREENSAVER SETTINGS > TEXT BACKDROP, on by default).
-    A one-panel layout (any other theme) is unchanged.
+    While the screensaver runs, `device/screensaver-panel.sh` (ES's screensaver-start/-stop and wake scripts) turns
+    the bottom panel's backlight off, and back on after. A one-panel layout (any other theme) is unchanged.
 - **Other themes** (since 1.4): a theme with a layout for the dual-screen canvas spans both panels, like
   ROCKNIXDS's own. A theme has one when its `theme.xml` includes a layout for the canvas's 4:1 shape
   (`if="{screen.ratio} == '4/1'"`), as [TechDweeb's theme](https://github.com/anthonycaccese/techdweeb-es) does.
