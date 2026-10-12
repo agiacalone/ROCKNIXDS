@@ -785,6 +785,9 @@ the top panel, the bottom panel, and an unused third.
   - `es-rgds-rnds.patch` (1.5): the rnds engine for ROCKNIXDS Pixel (above), the `rnds` theme view, instant view
     transitions and a launch without splash or fade for it (its ready screen stays up until the game takes over),
     standby wake-ups when its looping animations step, and `<include rndsFallback="true">` (skipped by this ES).
+  - `es-rgds-gamedetails.patch`: more about the game on the library's top screen: the rating as pixel stars, the
+    players and developer, a wrapped description, and optionally a gameplay screenshot instead of the box cover. Each
+    is a switch in USER INTERFACE SETTINGS with the theme's others (on by default; the picture stays the cover).
   - `es-rgds-lockdown.patch` (1.5): leaves out the settings that break ROCKNIXDS, offers only the themes in
     `/storage/.config/rocknixds/themes.allow` (ROCKNIXDS's own, plus each installed theme with a layout for the
     dual-screen canvas, which the launcher adds when ES starts), and replaces ROCKNIX's OS updater with ROCKNIXDS's
