@@ -822,6 +822,9 @@ the top panel, the bottom panel, and an unused third.
     (each second with seconds in the time format, each minute without) or for the next slide, and without the clock
     only for the next slide. RG DS Plus, slideshow with SHOW DATE TIME on: ES 14% -> 4% of a core, battery
     ~525 -> ~498 mA.
+  - `es-rgds-screensaver-controls.patch`: a tap on the dark bottom panel during the screensaver shows touch controls
+    there for 10 s: Wi-Fi and battery, the slide's game (next slide, play it) and the music (next song, stop or play),
+    lighting the bottom backlight while they show.
 - **Other themes** (since 1.4): a theme with a layout for the dual-screen canvas spans both panels, like
   ROCKNIXDS's own. A theme has one when its `theme.xml` includes a layout for the canvas's 4:1 shape
   (`if="{screen.ratio} == '4/1'"`), as [TechDweeb's theme](https://github.com/anthonycaccese/techdweeb-es) does.
