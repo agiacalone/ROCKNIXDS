@@ -2,8 +2,8 @@
 # ROCKNIXDS installer (Anbernic RG DS or RG DS Plus on ROCKNIX): dual-screen dii-ess-aye theme + patched EmulationStation + libdsflip (DraStic
 # straight to both panels) + hires 3D. Run ON the Anbernic RG DS as root (ssh in, default password: rocknix):
 #
-#   curl -fsSL https://raw.githubusercontent.com/JorreFog/ROCKNIXDS/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/JorreFog/ROCKNIXDS/main/install.sh | sh -s -- --with-60hz
+#   curl -fsSL https://raw.githubusercontent.com/agiacalone/ROCKNIXDS/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/agiacalone/ROCKNIXDS/main/install.sh | sh -s -- --with-60hz
 #
 # Options:
 #   --with-60hz     also retune both panels to 60.000 Hz (edits the device tree in /flash; backed up; reboot needed)
@@ -29,7 +29,7 @@
 # Everything it replaces is backed up under /storage/rgds-rocknix-backup/ first.
 set -e
 
-REPO=JorreFog/ROCKNIXDS
+REPO=agiacalone/ROCKNIXDS     # this fork: upstream (JorreFog/ROCKNIXDS) plus fixes not merged there yet
 BRANCH=${RGDS_BRANCH:-main}
 THEME_UPSTREAM=beebono/dii-ess-aye
 CANVAS_UPSTREAM=toniremi/canvas-ds
