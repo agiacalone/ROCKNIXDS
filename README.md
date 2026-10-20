@@ -63,6 +63,26 @@ Anbernic RG DS and RG DS Plus on ROCKNIX.</b></p>
 >
 > The `.img` file is out: see [Get started](#get-started) below for the easiest way to install.
 
+> [!NOTE]
+> **This is a fork.** It is [JorreFog/ROCKNIXDS](https://github.com/JorreFog/ROCKNIXDS) plus fixes that are open as
+> pull requests there, hosted here until upstream has them: any theme with a dual-screen layout (such as
+> [TechDweeb's](https://github.com/anthonycaccese/techdweeb-es)), the screensaver on the top panel with touch
+> controls, a charging battery, and more. Install it over ssh with one line, on an RG DS or RG DS Plus running
+> ROCKNIX:
+>
+> ```sh
+> curl -fsSL https://raw.githubusercontent.com/agiacalone/ROCKNIXDS/main/install.sh | sh
+> ```
+>
+> With TechDweeb's theme on both screens, already selected:
+>
+> ```sh
+> curl -fsSL https://raw.githubusercontent.com/agiacalone/ROCKNIXDS/techdweeb-preview/install-preview.sh | sh
+> ```
+>
+> Updates from the menu (*Updates & downloads > ROCKNIXDS*) then come from this fork. The SD card images below are
+> upstream's: flash one, then run the line above.
+
 ## Get started
 
 The easiest way: put ROCKNIXDS on a fresh microSD card. No ssh, no commands.
@@ -383,10 +403,10 @@ On an Anbernic RG DS or RG DS Plus running ROCKNIX, ssh in as `root` (default pa
 `rocknix`) and run:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/JorreFog/ROCKNIXDS/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/agiacalone/ROCKNIXDS/main/install.sh | sh
 ```
 
-The same command works on both handhelds: it installs the newest release for the one it runs on (v1.5 on the RG DS,
+This fork's command (upstream's is `JorreFog/ROCKNIXDS` in place of `agiacalone/ROCKNIXDS`). The same command works on both handhelds: it installs the newest release for the one it runs on (v1.5 on the RG DS,
 v1.5-plus on the RG DS Plus). `RGDS_BRANCH=beta` in front of `sh` installs the beta instead (the RG DS's `beta`
 branch, or `plus-beta` on a Plus), and a tag (`RGDS_BRANCH=v1.5`) installs that release. After that, *Updates &
 downloads > ROCKNIXDS* in the menu keeps it up to date.
