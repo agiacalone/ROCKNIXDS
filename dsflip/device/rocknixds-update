@@ -15,7 +15,7 @@
 # so installed-id is what was installed: never a branch head that moved in between, never another handheld's.
 # Host tests point ROCKNIXDS_CFG, ROCKNIXDS_STATE, ROCKNIXDS_MODEL_FILE and ROCKNIXDS_MODES_GLOB
 # at a temp tree. Unset, these are the paths on the device.
-REPO=JorreFog/ROCKNIXDS
+REPO=agiacalone/ROCKNIXDS     # this fork's releases (upstream plus fixes), the same as install.sh
 CFG=${ROCKNIXDS_CFG:-/storage/.config/system/configs/system.cfg}
 STATE=${ROCKNIXDS_STATE:-/storage/.config/rocknixds}
 MODEL_FILE=${ROCKNIXDS_MODEL_FILE:-/proc/device-tree/model}
