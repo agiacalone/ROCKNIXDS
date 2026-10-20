@@ -60,6 +60,15 @@ dual_theme() {
     done
     return 1
 }
+# The patched ES offers only the themes in rocknixds/themes.allow, which install.sh writes with ROCKNIXDS's own.
+# Add every installed theme that has a layout for the canvas, so it can be picked in the menu too.
+ALLOW=/storage/.config/rocknixds/themes.allow
+if [ -f "$ALLOW" ]; then
+    for t in /storage/.config/emulationstation/themes/*/ /storage/roms/themes/*/ /usr/share/emulationstation/themes/*/; do
+        t=${t%/}; t=${t##*/}
+        [ "$t" = "*" ] || grep -qxF "$t" "$ALLOW" || ! dual_theme "$t" || echo "$t" >> "$ALLOW"
+    done
+fi
 THEME_SET=$(sed -n 's/.*<string name="ThemeSet" value="\([^"]*\)".*/\1/p' /storage/.config/emulationstation/es_settings.cfg 2>/dev/null)
 if [ -z "$THEME_SET" ] || dual_theme "$THEME_SET"; then
     ES_ARGS="--resolution $CANVAS_W $PH"
