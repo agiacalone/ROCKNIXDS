@@ -757,8 +757,9 @@ and an unused third. Positions are fractions of that canvas, so both devices sha
     transitions and a launch without splash or fade for it (its ready screen stays up until the game takes over),
     standby wake-ups when its looping animations step, and `<include rndsFallback="true">` (skipped by this ES).
   - `es-rgds-lockdown.patch` (1.5): leaves out the settings that break ROCKNIXDS, offers only the themes in
-    `/storage/.config/rocknixds/themes.allow`, and replaces ROCKNIX's OS updater with ROCKNIXDS's (UPDATES &
-    DOWNLOADS > ROCKNIXDS). `touch /storage/.config/rocknixds/unlocked` shows everything again.
+    `/storage/.config/rocknixds/themes.allow` (ROCKNIXDS's own, plus each installed theme with a layout for the
+    dual-screen canvas, which the launcher adds when ES starts), and replaces ROCKNIX's OS updater with ROCKNIXDS's
+    (UPDATES & DOWNLOADS > ROCKNIXDS). `touch /storage/.config/rocknixds/unlocked` shows everything again.
   - `es-rgds-powersaver.patch` (1.4): with the power saver on "enhanced" (the installer sets it), an idle menu
     draws nothing; this wakes ES once a minute so the clock and battery stay current, and polls input once per
     frame instead of every millisecond while idle (SDL can't block with a gamepad open: ~760 wake-ups/s -> ~66),
@@ -771,11 +772,12 @@ and an unused third. Positions are fractions of that canvas, so both devices sha
     closes under the screensaver too.
     The theme's looping animations now stop after a few cycles. Idle menu: ~101% -> ~13% CPU (of 400), average clock
     ~1390 -> ~530 MHz, GPU at its lowest clock.
-- **Other themes** (since 1.4): pick any theme that is not `dii-ess-aye`, `canvas-ds`, `rocknixds-pixel-light` or
-  `rocknixds-pixel-dark` and ES restarts in stock ROCKNIX's layout, the top panel only, bottom panel off.
-  Pick one of those four again and it spans both panels at that device's size. Switching between dark and light does not restart ES:
-  they share a canvas. 1.3 stretched every theme across both screens. (`theme-changed.sh` does the restart when
-  the canvas has to change.)
+- **Other themes** (since 1.4): a theme with a layout for the dual-screen canvas spans both panels, like
+  ROCKNIXDS's own. A theme has one when its `theme.xml` includes a layout for the canvas's 4:1 shape
+  (`if="{screen.ratio} == '4/1'"`), as [TechDweeb's theme](https://github.com/anthonycaccese/techdweeb-es) does.
+  The launcher adds such themes to the theme menu. Pick any other theme and ES restarts in stock ROCKNIX's layout,
+  the top panel only, bottom panel off. Switching between dark and light does not restart ES: they share a canvas.
+  1.3 stretched every theme across both screens. (`theme-changed.sh` does the restart when the canvas has to change.)
 - **Boot splash** across both panels while ES loads hidden, then the menu appears placed, with no jumps.
 - **Touch in ES** (since 1.4): swipe to scroll the carousels, tap to open the selection, tap menu rows. ROCKNIX's
   sway config left ES with no touch events; `sway-config.theme` attaches the touchscreens to ES's seat too.
