@@ -623,7 +623,8 @@ fi
 
 # ---- 60 Hz panels (the RG DS; on by default, --no-60hz skips it) -----------------------------------------------
 # On by default since 1.6.3.2 (upstream issue #86: people expected it from the image). The script only touches the
-# RG DS's own device tree, and only when it holds the stock timing; the RG DS Plus has no such file and is skipped.
+# RG DS's own device tree, and only when it holds the stock timing. The RG DS Plus never runs this copy: it gets the
+# Plus release's install.sh, whose script retunes the Plus (60.17 -> 60.0027 Hz) by its model.
 # A reboot is asked for only when the timing was just written, not when it was already there. --no-60hz is
 # remembered (/storage/.config/rocknixds/no-60hz), since the menu's updates run this script without options;
 # --with-60hz forgets it.

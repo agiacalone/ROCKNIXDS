@@ -17,7 +17,7 @@ Anbernic RG DS and RG DS Plus on ROCKNIX.</b></p>
 >   it over ssh on stock ROCKNIX, and `install.sh --uninstall` takes the device back to it. ROCKNIX's other
 >   systems, saves and services stay as they are.
 > - **It follows upstream's last releases** (1.6.3 on the RG DS, 1.6.4 on the RG DS Plus) with fixes added. Fork
->   releases add a fourth number: 1.6.3.1, 1.6.4.1-plus.
+>   releases add a fourth number: 1.6.3.1, 1.6.4.2-plus.
 > - **The Store, Döda Kvarter and Bank & Trade come from this fork,** so they keep working whatever happens
 >   upstream.
 > - **BananaOS features that suit ROCKNIX are being brought over,** credited to BananaOS (MIT).
@@ -443,7 +443,7 @@ its art, the theme draws a card with the game's name or box art.
 
 | Option | |
 |---|---|
-| `--no-60hz` | don't retune the RG DS's panels to 60.000 Hz. On by default since 1.6.3.2, the RG DS only (edits the device tree in `/flash`, backed up; needs a reboot once). `--with-60hz` is still accepted. |
+| `--no-60hz` | don't retune the panels to 60 Hz. On by default since 1.6.3.2 / 1.6.4.2-plus, on both handhelds (edits the device tree in `/flash`, backed up; needs a reboot once). `--with-60hz` is still accepted. |
 | `--no-theme` / `--no-dsflip` / `--no-hires` / `--no-game` / `--no-store` | skip that part (`--no-game`: Döda Kvarter; `--no-store`: the ROCKNIXDS Store) |
 | `--uninstall` | undo what the installer changed; settings you made since the install are kept. Add `--restore-files` to put back the whole config files from the install-time backups instead |
 | `--version` | print the installed ROCKNIXDS version (also in `/storage/.config/rocknixds-version`) |
@@ -740,8 +740,8 @@ every 10 seconds. The panel timing is a text string in the device tree. Lowering
 `pll_vpll` is fixed at 126.4 MHz and the VOP only divides by an integer, so anything below ÷3 silently
 drops to ÷4 (~45 Hz). Instead, the porches were retuned to 1353×519 @ 42.133 MHz = **60.0013 Hz**
 (`dii-ess-aye/device/apply-60hz-dtb.sh`, checked by md5). A ROCKNIX update overwrites `/flash`, so it has to
-be re-applied. Since 1.6.3.2, `install.sh` and the menu's updates apply it by default on the RG DS; `--no-60hz`
-turns it off for good.
+be re-applied. Since 1.6.3.2 and 1.6.4.2-plus, `install.sh` and the menu's updates apply it by default on both
+handhelds (the RG DS Plus goes from 60.17 to 60.0027 Hz); `--no-60hz` turns it off for good.
 
 ## `drastic-vsync/`: the earlier pacing shim (now the fallback)
 
