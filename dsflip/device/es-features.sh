@@ -1,13 +1,13 @@
 #!/bin/sh
 # es-features.sh: puts ROCKNIXDS's ds-* shaders into EmulationStation's DraStic "shader" option, and adds its
-# "resume on quit" option (nds.resume_on_quit, read by session.sh; unset = on), its "power profile" option
-# (nds.power_profile: balanced, performance or battery; unset = balanced; session.sh) and its "share performance
-# logs" option (nds.share_performance_logs: 1 uploads a performance log on quit, 0 does not, unset asks). Its "3D renderer"
+# "resume on quit" option (nds.resume_on_quit, read by session.sh; unset = on) and its "power profile" option
+# (nds.power_profile: balanced, performance or battery; unset = balanced; session.sh). Its "3D renderer"
 # option (nds.renderer: superdrastic = Gengis Engine, SuperDrastic's own hi-res rasterizer, DSFLIP_RAST=1 in session.sh;
 # drastic = DraStic's; unset, the menu's Auto, is Gengis Engine since 1.5.13), its "3D resolution" (nds.resolution3d: 2x,
 # 3x since 1.6; DSFLIP_RAST_SCALE, Gengis Engine only; unset is the menu's Auto, and Gengis Engine keeps its own scale)
 # and its "3D texture filter" (nds.texture_filter: nearest, bilinear, sharp; DSFLIP_RAST_TEXFILTER, only used with
-# Gengis Engine) are their own options, siblings of share performance logs.
+# Gengis Engine) are their own options, siblings of power profile. The "share performance logs" option (1.5 to
+# 1.6.3.1, uploads to upstream's queue) is no longer written; strip_ours still takes it out of a copy that has it.
 # 1.5.13's "wfc dns" option (nds.wfc_dns: Wi-Fi online play through a Nintendo WFC replacement server) is no
 # longer offered: online play is parked for 1.6, and SuperDrastic only turns its Wi-Fi hook on with the DSFLIP_WFC
 # environment switch now. strip_ours still takes the option out of a copy that has it.
@@ -85,7 +85,7 @@ strip_ours() {
 
 # our choices go at the end of the drastic-sa core's <feature name="shader">, indented like its other choices;
 # any earlier copy of them is dropped first, so this is idempotent. The resume option follows the shader option.
-# The 3D options follow share performance logs as siblings.
+# The 3D options follow power profile as siblings.
 add_ours() {
     strip_ours < "$1" | awk -v more="$MORE_SHADERS" '
         /<core name="drastic-sa"/ { core = 1 }
@@ -111,10 +111,6 @@ add_ours() {
             print ind "<choice name=\"balanced\" value=\"balanced\" />"
             print ind "<choice name=\"performance\" value=\"performance\" />"
             print ind "<choice name=\"battery saver\" value=\"battery\" />"
-            print fi "</feature>"
-            print fi "<feature name=\"share performance logs\">"
-            print ind "<choice name=\"yes\" value=\"1\" />"
-            print ind "<choice name=\"no\" value=\"0\" />"
             print fi "</feature>"
             print fi "<feature name=\"3D renderer\" value=\"renderer\">"
             print ind "<choice name=\"DraStic\" value=\"drastic\" />"

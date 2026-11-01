@@ -157,12 +157,12 @@ class EsFeaturesTest(unittest.TestCase):
         self.assertIn("3D renderer", feats)
         self.assertIn("3D resolution", feats)
         self.assertIn("3D texture filter", feats)
-        self.assertIn("share performance logs", feats)
+        self.assertNotIn("share performance logs", feats)   # 1.6.3.2: the upload is gone
         self.assertIn("resume on quit", feats)
         self.assertIn("power profile", feats)
         self.assertIn("microphone sensitivity", feats)
         self.assertNotIn("wfc dns", feats)                  # online play is parked for 1.6
-        for name in ("share performance logs", "3D renderer", "3D resolution", "3D texture filter", "microphone sensitivity"):
+        for name in ("3D renderer", "3D resolution", "3D texture filter", "microphone sensitivity"):
             self.assertFalse(any(tag == "feature" for tag, _, _ in feats[name]["kids"]), name)
         self.assertEqual(feats["3D renderer"]["value"], "renderer")
         self.assertEqual(
@@ -178,10 +178,6 @@ class EsFeaturesTest(unittest.TestCase):
         self.assertEqual(
             [value for tag, _, value in feats["3D texture filter"]["kids"]],
             ["nearest", "bilinear", "sharp"],
-        )
-        self.assertEqual(
-            [value for tag, _, value in feats["share performance logs"]["kids"]],
-            ["1", "0"],
         )
         shader_values = [value for tag, _, value in feats["shader"]["kids"]]
         self.assertIn("none", shader_values)

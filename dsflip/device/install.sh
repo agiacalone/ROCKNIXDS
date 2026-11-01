@@ -18,12 +18,9 @@ cp "$HERE/libdsflip.so" "$HERE/session.sh" "$HERE/restore.sh" $D/dsflip/
 [ -f "$HERE/es-features.sh" ] && cp "$HERE/es-features.sh" $D/dsflip/
 [ -f "$HERE/preload-guard.so" ] && cp "$HERE/preload-guard.so" $D/dsflip/
 [ -f "$HERE/playstats.py" ] && cp "$HERE/playstats.py" $D/dsflip/
-[ -f "$HERE/perf-session.py" ] && cp "$HERE/perf-session.py" $D/dsflip/
-if [ -f "$HERE/es-share-logs.sh" ]; then
-    mkdir -p /storage/.config/emulationstation/scripts/start
-    cp "$HERE/es-share-logs.sh" /storage/.config/emulationstation/scripts/start/rocknixds-share-logs.sh
-    chmod +x /storage/.config/emulationstation/scripts/start/rocknixds-share-logs.sh
-fi
+# The performance-log upload (perf-session.py, its first-launch question) posted to upstream's queue, which this
+# fork doesn't read: an update takes it off (1.6.3.2).
+rm -f $D/dsflip/perf-session.py /storage/.config/emulationstation/scripts/start/rocknixds-share-logs.sh
 [ -f "$HERE/menu-power.sh" ] && cp "$HERE/menu-power.sh" $D/dsflip/
 [ -f "$HERE/battery-led-status" ] && cp "$HERE/battery-led-status" $D/dsflip/ && chmod +x $D/dsflip/battery-led-status
 [ -f "$HERE/powerstate" ] && cp "$HERE/powerstate" $D/dsflip/ && chmod +x $D/dsflip/powerstate

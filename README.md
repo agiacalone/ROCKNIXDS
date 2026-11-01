@@ -262,11 +262,9 @@ the menu's updater pick the right one for the handheld they run on.
   development: `touch /storage/.config/rocknixds/unlocked` and restart the menu to see everything.
 - **A second dual-screen theme, [canvas-ds](https://github.com/toniremi/canvas-ds)** by toniremi, downloaded from
   upstream at a verified version (`--no-canvas` skips the ~180 MB). Only verified themes can be picked.
-- **Performance logs, if you allow them.** The first time the menu appears it asks: A uploads a log when you quit a
-  game, B does not. Change it later under *Nintendo DS > Share performance logs*. The log is the same once-a-second
-  record as [`tools/rgds-monitor.py`](tools/rgds-monitor.py) and lands on the
-  [`device-logs`](https://github.com/JorreFog/ROCKNIXDS/tree/device-logs) branch, with no token on the device. What
-  the beta logs showed: [docs/perf-logs-1.5-beta.md](docs/perf-logs-1.5-beta.md).
+- **No performance-log upload since 1.6.3.2.** 1.5 to 1.6.3.1 could upload a log to upstream's `device-logs` branch
+  when you allowed it. This fork doesn't collect them, so 1.6.3.2 takes the upload and its question off. What the beta
+  logs showed: [docs/perf-logs-1.5-beta.md](docs/perf-logs-1.5-beta.md).
 - **The volume rocker shows a card on the top screen during a game.** "Launch this game at startup" runs once per
   boot instead of again every time you quit. The menu is back ~0.5 s sooner after a DS game. ROCKNIX's charger
   watcher no longer starts a process every 2 s (2.2% -> 0.13% of a core).

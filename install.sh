@@ -225,7 +225,7 @@ if [ $UNINSTALL = 1 ]; then
             done
         fi
         if [ -f $ESF ] && [ -f $DRASTIC/dsflip/es-features.sh ]; then
-            # shader choices, resume, power profile, share performance logs, 3D renderer and texture filter.
+            # shader choices, resume, power profile, 3D renderer and texture filter (and 1.6.3.1's share performance logs).
             # Depth-aware (--strip-options): 1.5.5 nested the 3D options, and a skip that stops at the first
             # </feature> leaves the file unparsable.
             sh $DRASTIC/dsflip/es-features.sh --strip-options
@@ -538,8 +538,7 @@ if [ $DSFLIP_ON = 1 ]; then
     cp $SD/libsuperdrastic.so $WORK/dsflip/libdsflip.so     # the name ROCKNIXDS's scripts and older installs use
     cp "$SRC/dsflip/device/session.sh" "$SRC/dsflip/device/restore.sh" \
        "$SRC/dsflip/device/drastic-wrapper.sh" "$SRC/dsflip/device/install.sh" "$SRC/dsflip/device/es-features.sh" \
-       "$SRC/dsflip/device/fast-switch" "$SRC/dsflip/device/playstats.py" "$SRC/dsflip/device/perf-session.py" \
-       "$SRC/dsflip/device/es-share-logs.sh" "$SRC/dsflip/device/menu-power.sh" \
+       "$SRC/dsflip/device/fast-switch" "$SRC/dsflip/device/playstats.py" "$SRC/dsflip/device/menu-power.sh" \
        "$SRC/dsflip/device/battery-led-status" "$SRC/dsflip/device/powerstate" \
        "$SRC/dsflip/device/media-auto.sh" "$SRC/dsflip/device/preload-guard.so" "$SRC/dsflip/device/drastic-launch" \
        $WORK/dsflip/
