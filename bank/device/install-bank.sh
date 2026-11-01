@@ -1,7 +1,7 @@
 #!/bin/sh
 # Installs (or updates) ROCKNIXDS Bank & Trade on the handheld. As root (ssh in, password rocknix):
 #
-#   curl -fsSL https://raw.githubusercontent.com/JorreFog/ROCKNIXDS/main/bank/device/install-bank.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/agiacalone/ROCKNIXDS/main/bank/device/install-bank.sh | sh
 #
 # Options:
 #   --uninstall   remove the app and its entry in the menu (the bank itself, in /storage/roms/rocknixds-bank, stays)
@@ -16,7 +16,7 @@
 # them for a ROCKNIXDS release), with rocknixds-bank-<version>-aarch64.tar.gz and its .sha256.
 set -e
 
-REPO=JorreFog/ROCKNIXDS
+REPO=agiacalone/ROCKNIXDS
 DEST=/storage/.config/rocknixds/bank
 PORTS=/storage/roms/ports
 APPS=/storage/.config/rocknixds/apps/bank

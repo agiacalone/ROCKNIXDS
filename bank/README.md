@@ -42,7 +42,7 @@ Trade*, A. It updates it from there too ([../store](../store)).
 Or on the handheld, as root over ssh (password `rocknix`), with Wi-Fi on:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/JorreFog/ROCKNIXDS/main/bank/device/install-bank.sh | sh
+curl -fsSL https://raw.githubusercontent.com/agiacalone/ROCKNIXDS/main/bank/device/install-bank.sh | sh
 ```
 
 It downloads the newest `bank-v*` release (about 24 MB, the .NET runtime included: nothing else to install), puts the

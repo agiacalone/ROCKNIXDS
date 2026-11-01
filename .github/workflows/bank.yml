@@ -46,7 +46,7 @@ jobs:
           body: |
             ROCKNIXDS Bank & Trade: a Pokémon bank, PKHeX legality checks and Wi-Fi trading for the RG DS and RG DS Plus.
             Install on the handheld (ssh, as root):
-            `curl -fsSL https://raw.githubusercontent.com/JorreFog/ROCKNIXDS/main/bank/device/install-bank.sh | sh`
+            `curl -fsSL https://raw.githubusercontent.com/agiacalone/ROCKNIXDS/main/bank/device/install-bank.sh | sh`
             See bank/README.md.
           prerelease: true
           make_latest: false

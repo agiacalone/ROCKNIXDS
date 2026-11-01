@@ -327,7 +327,7 @@ class StoreTest(unittest.TestCase):
         st.mkdir(parents=True)
         (st / "rocknixds-store").write_text("old\n")
         (st / "VERSION").write_text("0.1.0\n")
-        self.sb.publish("JorreFog/ROCKNIXDS", "store-v0.2.0", "rocknixds-store-0.2.0-aarch64.tar.gz",
+        self.sb.publish("agiacalone/ROCKNIXDS", "store-v0.2.0", "rocknixds-store-0.2.0-aarch64.tar.gz",
                         {"store": b"bin", "rocknixds-store": b"new", "ROCKNIXDS Store.sh": b"#!/bin/bash\n"}, "store")
         self.sb.legacy_dodakvarter("0.2.0")
         self.run_cli("install", "hello")

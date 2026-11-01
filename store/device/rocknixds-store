@@ -54,8 +54,8 @@ import zlib
 ROOT = os.environ.get("RNDS_STORE_ROOT", "")
 CATALOG_ENV = os.environ.get("RNDS_STORE_CATALOG")
 CATALOG_URL = CATALOG_ENV or os.environ.get(       # (RNDS_STORE_MAIN_CATALOG: tests)
-    "RNDS_STORE_MAIN_CATALOG", "https://raw.githubusercontent.com/JorreFog/ROCKNIXDS/main/store/catalog.json")
-RAW = os.environ.get("RNDS_STORE_RAW", "https://raw.githubusercontent.com/JorreFog/ROCKNIXDS")   # a ref's files
+    "RNDS_STORE_MAIN_CATALOG", "https://raw.githubusercontent.com/agiacalone/ROCKNIXDS/main/store/catalog.json")
+RAW = os.environ.get("RNDS_STORE_RAW", "https://raw.githubusercontent.com/agiacalone/ROCKNIXDS")   # a ref's files
 NOTIFY = os.environ.get("RNDS_STORE_NOTIFY", "http://localhost:1234/notify")   # the menu's API
 API = os.environ.get("RNDS_STORE_API", "https://api.github.com/repos/{repo}/releases?per_page=100")
 DOWNLOAD = os.environ.get("RNDS_STORE_DOWNLOAD", "https://github.com/{repo}/releases/download/{tag}/{asset}")
