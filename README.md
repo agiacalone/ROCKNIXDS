@@ -8,17 +8,21 @@
 <p align="center"><b>Full-speed 2× DraStic and ROCKNIXDS Pixel, a dual-screen frontend with its own engine, for the
 Anbernic RG DS and RG DS Plus on ROCKNIX.</b></p>
 
-<p align="center">
-  <a href="https://github.com/JorreFog/BananaLinux"><img src="docs/img/bananaos-moved.png" width="100%" alt="Development has moved to BananaOS: ROCKNIXDS's work goes on as BananaOS, a whole Linux of its own for the RG DS and RG DS Plus, with the same menu, two DS emulators and a fast boot. ROCKNIXDS stays here for those who use it. Go to BananaOS"></a>
-</p>
-
 > [!IMPORTANT]
-> **Development has moved to [BananaOS](https://github.com/JorreFog/BananaLinux).** Everything ROCKNIXDS started
-> (ROCKNIXDS Pixel, SuperDrastic's display path, the in-game menu, the Store) now lives on in BananaOS: its own
-> Linux for the RG DS and RG DS Plus instead of changes on top of ROCKNIX. It boots to the menu in about 4 to 6
-> seconds, has two DS emulators (SuperDrastic and BananaDS, with RetroAchievements and online play), RetroArch,
-> PortMaster and the App Store, and gets the new work. ROCKNIXDS 1.6.3 (RG DS) and 1.6.4 (RG DS Plus) stay here
-> and keep working. Coming from ROCKNIXDS? BananaOS takes a ROCKNIX `.dsv` next to a game as its save, and the
+> **This fork carries ROCKNIXDS on.** Upstream, [JorreFog/ROCKNIXDS](https://github.com/JorreFog/ROCKNIXDS),
+> stopped on 2026-10-22, when its author moved to [BananaOS](https://github.com/JorreFog/BananaLinux), a separate
+> Linux for the RG DS and RG DS Plus. This fork stays on ROCKNIX:
+>
+> - **It works with base ROCKNIX.** ROCKNIXDS is a layer on a standard ROCKNIX image, not an OS of its own. Install
+>   it over ssh on stock ROCKNIX, and `install.sh --uninstall` takes the device back to it. ROCKNIX's other
+>   systems, saves and services stay as they are.
+> - **It follows upstream's last releases** (1.6.3 on the RG DS, 1.6.4 on the RG DS Plus) with fixes added. Fork
+>   releases add a fourth number: 1.6.3.1, 1.6.4.1-plus.
+> - **The Store, Döda Kvarter and Bank & Trade come from this fork,** so they keep working whatever happens
+>   upstream.
+> - **BananaOS features that suit ROCKNIX are being brought over,** credited to BananaOS (MIT).
+>
+> Want BananaOS instead? It takes a ROCKNIX `.dsv` next to a game as its save, and its
 > [Save Mover](https://jorrefog.github.io/BananaLinux/save-mover/) converts the rest.
 
 <p align="center">
@@ -64,8 +68,8 @@ Anbernic RG DS and RG DS Plus on ROCKNIX.</b></p>
 > The `.img` file is out: see [Get started](#get-started) below for the easiest way to install.
 
 > [!NOTE]
-> **This is a fork.** It is [JorreFog/ROCKNIXDS](https://github.com/JorreFog/ROCKNIXDS) plus fixes that are open as
-> pull requests there, hosted here until upstream has them: any theme with a dual-screen layout (such as
+> **This is a fork.** It is [JorreFog/ROCKNIXDS](https://github.com/JorreFog/ROCKNIXDS) plus fixes that were sent there as
+> pull requests and are maintained here: any theme with a dual-screen layout (such as
 > [TechDweeb's](https://github.com/anthonycaccese/techdweeb-es)), the screensaver on the top panel with touch
 > controls, a charging battery, and more. Install it over ssh with one line, on an RG DS or RG DS Plus running
 > ROCKNIX:
@@ -439,12 +443,12 @@ its art, the theme draws a card with the game's name or box art.
 
 | Option | |
 |---|---|
-| `--with-60hz` | also retune both panels to 60.000 Hz (edits the device tree in `/flash`, backed up; needs a reboot) |
+| `--no-60hz` | don't retune the RG DS's panels to 60.000 Hz. On by default since 1.6.3.2, the RG DS only (edits the device tree in `/flash`, backed up; needs a reboot once). `--with-60hz` is still accepted. |
 | `--no-theme` / `--no-dsflip` / `--no-hires` / `--no-game` / `--no-store` | skip that part (`--no-game`: Döda Kvarter; `--no-store`: the ROCKNIXDS Store) |
 | `--uninstall` | undo what the installer changed; settings you made since the install are kept. Add `--restore-files` to put back the whole config files from the install-time backups instead |
 | `--version` | print the installed ROCKNIXDS version (also in `/storage/.config/rocknixds-version`) |
 
-Pass options like this: `curl -fsSL …/install.sh | sh -s -- --with-60hz`.
+Pass options like this: `curl -fsSL …/install.sh | sh -s -- --no-60hz`.
 To go back to the stock DraStic display path without uninstalling: `touch /storage/.config/drastic/nodsflip`.
 
 ---
@@ -736,7 +740,8 @@ every 10 seconds. The panel timing is a text string in the device tree. Lowering
 `pll_vpll` is fixed at 126.4 MHz and the VOP only divides by an integer, so anything below ÷3 silently
 drops to ÷4 (~45 Hz). Instead, the porches were retuned to 1353×519 @ 42.133 MHz = **60.0013 Hz**
 (`dii-ess-aye/device/apply-60hz-dtb.sh`, checked by md5). A ROCKNIX update overwrites `/flash`, so it has to
-be re-applied.
+be re-applied. Since 1.6.3.2, `install.sh` and the menu's updates apply it by default on the RG DS; `--no-60hz`
+turns it off for good.
 
 ## `drastic-vsync/`: the earlier pacing shim (now the fallback)
 
