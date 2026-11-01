@@ -1,0 +1,1575 @@
+From 31e86bb08868a848a13111a51c06fdec13120a3b Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 23:04:41 +0100
+Subject: [PATCH 01/12] menu: a quit (SIGTERM) while the in-game menu is open
+ closes it and reaches DraStic
+
+The menu drains DraStic's SDL queue with the real SDL_PollEvent while it is
+open, and handle_sdl only looked at joystick/touch events: the SDL_QUIT that
+SDL makes of a SIGTERM was eaten, so DraStic never quit (still running after
+the menu closed; only -9 ended it). Now handle_sdl closes the menu and pushes
+the event back. Measured on the RG DS (0.5.0-beta.2, bind-mounted lib): TERM
+with the menu open, gone in 0.2 s (was: alive 8 s later and after closing).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 1305ea3b124acfd65b69ca5d8e9f0d10892df481)
+(cherry picked from commit fb7c79cc17f92fec0fd6549ba0de9d522c3a7b0b)
+---
+ src/menu.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/menu.c b/src/menu.c
+index 66bed23..5da97fa 100644
+--- a/src/menu.c
++++ b/src/menu.c
+@@ -59,6 +59,7 @@ int dsflip_shader_on(void);
+ /* shader.c */
+ const char *shader_name(void);
+ int shader_list(char (*names)[48], int max);
++int SDL_PushEvent(void *event);
+ /* audio.c */
+ void audio_mute(int on);
+ int audio_ui_load(int id, const int16_t *pcm, int frames, int rate, int ch);
+@@ -1252,6 +1253,15 @@ static void dir_press(int dx, int dy) { nav(dx, dy); held_dir = 1; rep_dx = dx;
+ static void dir_release(void) { held_dir = 0; }
+ static void handle_sdl(const uint8_t *e) {
+     uint32_t type; memcpy(&type, e, 4);
++    if (type == 0x100) {                            /* SDL_QUIT (SIGTERM: a shutdown, the menu's quit): the menu's own
++                                                     * poll took it from DraStic, which would never quit. Close and
++                                                     * hand it back, so DraStic quits as it does without the menu */
++        uint8_t q[64]; memcpy(q, e, sizeof q);
++        dsflip_log("[menu] quit asked while open: closing, DraStic quits\n");
++        close_menu();
++        SDL_PushEvent(q);
++        return;
++    }
+     if (type == 0x603 || type == 0x604) {           /* SDL_JOYBUTTONDOWN / UP */
+         int b = e[12], down = type == 0x603;
+         if (!down) { if (b == b_up || b == b_down || b == b_left || b == b_right) dir_release(); return; }
+-- 
+2.56.0
+
+
+From 20adc839bd036885679b0f82d258a381214bf842 Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 13:15:17 +0100
+Subject: [PATCH 02/12] Quit ~650 ms sooner on the RG DS Plus: the sound
+ device's last close left to an exec'd helper; DSFLIP_LOG_TIME
+
+DraStic is SIGKILLed to quit; its last thread to exit closed the output PCM, and the aw88166 amplifiers' stop (DSP
+writes over I2C) held that exit ~600 ms, then the DRM release ~90 ms: superdrastic-run's wait, and so the menu,
+waited for it. Before each quit's SIGKILL (resume.c quit_kill), audio_hand_off forks a helper that keeps only the
+output's file (dup'd to fd 3) and execs /bin/sh with an empty environment, polling /proc/<drastic> every 50 ms; the
+close then happens in the helper's exit. Exec'd at once, it holds none of DraStic's memory or display mappings
+(0.4.2's fork-only try kept them; HYPOTHESIS: that was its 'display busy' next start). Async-signal-safe (the USR1
+handler calls it). DSFLIP_AUDIO_CLOSE_CHILD=0 turns it off.
+
+DSFLIP_LOG_TIME=1: log lines prefixed with CLOCK_BOOTTIME (LOG() now goes through dsflip_log), and a
+'[start] first frame committed' mark.
+
+RG DS Plus, Mario Kart DS, exit combo -> menu picture, alternated: stock 1465/1469 ms, this 879/773 ms; the next
+start after each hand-off quit was normal (no 'display busy', no passthrough).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 365f5c9e835aea1fb59d5f77861e86e777819099)
+
+ROCKNIXDS (agiacalone fork) conflict notes: our resume.c's quit logic
+(stall watch, repeat handling, quit_watch) is kept; its SIGKILLs on the
+quit paths go through quit_kill. The exit combo's direct quit_kill when
+quit_saves is off is left out (no quit_saves on our line). The audio
+hand-off is OFF unless DSFLIP_AUDIO_CLOSE_CHILD=1: on ROCKNIX the
+output's poll file is PipeWire's socket, not the amplifiers' device.
+---
+ src/audio.c  | 45 +++++++++++++++++++++++++++++++++++++++++++++
+ src/dsflip.c | 10 +++++++++-
+ src/resume.c | 15 +++++++++++----
+ 3 files changed, 65 insertions(+), 5 deletions(-)
+
+diff --git a/src/audio.c b/src/audio.c
+index e81178f..9883bac 100644
+--- a/src/audio.c
++++ b/src/audio.c
+@@ -41,6 +41,10 @@
+ #include <pthread.h>
+ #include <dlfcn.h>
+ #include <math.h>
++#include <sys/stat.h>
++#include <poll.h>
++#include <fcntl.h>
++#include <signal.h>
+ #include <unistd.h>
+ 
+ void dsflip_log(const char *fmt, ...);
+@@ -271,6 +275,9 @@ static long (*a_readi)(void *, void *, unsigned long);
+ static int (*a_recover)(void *, int, int);
+ static const char *(*a_strerror)(int);
+ static int (*a_close)(void *);
++static int (*a_cfgfree)(void);            /* snd_config_update_free_global: forget the configuration read so far */
++static int (*a_pollfds)(void *, struct pollfd *, unsigned);   /* snd_pcm_poll_descriptors: the stream's file */
++static volatile int out_fd = -1;          /* the output's file (the device node), for audio_hand_off */
+ static volatile int st_xrun;
+ /* Opening and configuring PCMs is serialized: the output and the mic used to be opened at the same moment from two
+  * threads (DraStic's, in SDL_OpenAudio, and the mic's), and PipeWire's ALSA plugin sets itself up on each open
+@@ -286,6 +293,8 @@ static void alsa_load(void) {
+     *(void **)&a_writei = dlsym(h, "snd_pcm_writei"); *(void **)&a_recover = dlsym(h, "snd_pcm_recover");
+     *(void **)&a_strerror = dlsym(h, "snd_strerror");
+     *(void **)&a_readi = dlsym(h, "snd_pcm_readi"); *(void **)&a_close = dlsym(h, "snd_pcm_close");
++    *(void **)&a_cfgfree = dlsym(h, "snd_config_update_free_global");
++    *(void **)&a_pollfds = dlsym(h, "snd_pcm_poll_descriptors");
+     alsa_ok = a_open && a_set_params && a_writei && a_readi && a_recover;
+ }
+ static int alsa_syms(void) { pthread_once(&alsa_once, alsa_load); return alsa_ok ? 0 : -1; }
+@@ -298,6 +307,10 @@ static int alsa_pcm(void **p, int stream, int channels, int rate, unsigned laten
+     else if ((e = a_set_params(*p, 2 /* SND_PCM_FORMAT_S16_LE */, 3 /* SND_PCM_ACCESS_RW_INTERLEAVED */, channels, rate,
+                                1 /* soft resample */, latency_us)) < 0)
+         dsflip_log("[%s] ALSA params: %s\n", who, a_strerror ? a_strerror(e) : "?");
++    if (e >= 0 && stream == 0 && a_pollfds) {   /* the output's device file, for a quit's hand-off (audio_hand_off) */
++        struct pollfd pf;
++        out_fd = a_pollfds(*p, &pf, 1) == 1 ? pf.fd : -1;
++    }
+     pthread_mutex_unlock(&alsa_mu);
+     return e < 0 ? e : 0;
+ }
+@@ -413,6 +426,38 @@ static void *writer(void *a) {           /* blocking writes pace this thread at
+     return 0;
+ }
+ 
++/* Quitting (resume.c, just before DraStic is killed): the output's last close, where the driver stops the device, is
++ * left to a helper that holds only that file until DraStic has gone, so the quit doesn't wait for it. On the RG DS
++ * Plus that close takes ~600 ms (the aw88166 amplifiers' stop writes their DSP over I2C), and it ran in DraStic's
++ * last thread to exit: the menu came back that much later. The helper is exec'd at once (/bin/sh, an empty
++ * environment), so it holds none of DraStic's memory or display buffers, only the sound device's file; a fork that
++ * kept DraStic's memory (the 0.4.2 try) also kept its mappings of the display's buffers until it exited. The device
++ * is busy for those ~600 ms (a menu sound then isn't heard). Async-signal-safe (fork, dup2, close, execve): it runs
++ * from the USR1 handler too. ROCKNIXDS (agiacalone fork): OFF unless DSFLIP_AUDIO_CLOSE_CHILD=1. On ROCKNIX, ALSA's
++ * "default" is PipeWire, so the output's poll file is PipeWire's socket, not the amplifiers' device node: the close
++ * this saves happens in PipeWire, not in DraStic's exit. The BananaOS line (no sound server) has it on by default. */
++static int hand_off_off = -1;
++void audio_hand_off(void) {
++    int fd = out_fd;
++    if (hand_off_off < 0) { const char *e = getenv("DSFLIP_AUDIO_CLOSE_CHILD"); hand_off_off = !(e && *e == '1'); }
++    if (hand_off_off || fd < 0) return;
++    char pid[24]; int n = 0; long v = (long)getpid(); char t[24]; int k = 0;
++    do { t[k++] = (char)('0' + v % 10); v /= 10; } while (v && k < 23);
++    while (k) pid[n++] = t[--k];
++    pid[n] = 0;
++    pid_t c = fork();
++    if (c == 0) {
++        for (int i = 0; i < 32; i++) signal(i, SIG_DFL);
++        if (fd != 3) { if (dup2(fd, 3) < 0) _exit(1); }
++        else { int fl = fcntl(3, F_GETFD); if (fl >= 0) fcntl(3, F_SETFD, fl & ~FD_CLOEXEC); }
++        long maxfd = sysconf(_SC_OPEN_MAX);
++        for (long i = 0; i < maxfd && i < 65536; i++) if (i != 3) close((int)i);
++        char *const argv[] = { "sh", "-c", "while [ -e /proc/$0 ]; do /bin/sleep 0.05; done", pid, 0 };
++        char *const envp[] = { 0 };
++        execve("/bin/sh", argv, envp);
++        _exit(0);                         /* (no shell: the file closes here, in this exit) */
++    }
++}
+ int audio_pump_enabled(void) { const char *e = getenv("DSFLIP_AUDIO_PUMP"); return !(e && *e == '0'); }
+ int audio_out_alsa(void) { const char *o = getenv("DSFLIP_AUDIO_OUT"); return !(o && !strcmp(o, "sdl")); }
+ int audio_sdl_off;                       /* dsflip.c's SDL_Init left SDL's audio subsystem out: start it before SDL's device */
+diff --git a/src/dsflip.c b/src/dsflip.c
+index a763f52..05e3414 100644
+--- a/src/dsflip.c
++++ b/src/dsflip.c
+@@ -179,7 +179,8 @@ static void set_fifo(int prio) {
+ static long long st_shade_sum, st_shade_max; static int st_shade_n;
+ static long long st_t0, st_iv_max[2];
+ 
+-#define LOG(...) do { if (lg) fprintf(lg, __VA_ARGS__); } while (0)
++void dsflip_log(const char *fmt, ...);
++#define LOG(...) dsflip_log(__VA_ARGS__)
+ #define REAL(ret, fn, ...) static ret (*real)(__VA_ARGS__); if (!real) real = dlsym(RTLD_NEXT, #fn)
+ 
+ static long long now_us(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000000LL + t.tv_nsec / 1000; }
+@@ -261,8 +262,14 @@ static void add_fb(drmModeAtomicReq *r, panel *p, dbuf *b) {
+ 
+ void ra_frame(void);
+ 
++static int log_time = -1;               /* DSFLIP_LOG_TIME=1: each line after the boot clock (CLOCK_BOOTTIME, /proc/uptime's) */
+ void dsflip_log(const char *fmt, ...) {
+     if (!lg) return;
++    if (log_time < 0) { const char *e = getenv("DSFLIP_LOG_TIME"); log_time = e && *e == '1'; }
++    if (log_time) {
++        struct timespec ts; clock_gettime(CLOCK_BOOTTIME, &ts);
++        fprintf(lg, "%lld.%03ld ", (long long)ts.tv_sec, ts.tv_nsec / 1000000);
++    }
+     va_list ap; va_start(ap, fmt); vfprintf(lg, fmt, ap); va_end(ap);
+ }
+ 
+@@ -454,6 +461,7 @@ static void try_commit(void) {         /* called with mu held */
+         P[i].ready = dequeue(i);        /* the oldest queued frame is next */
+         if (P[i].ready && 1 + P[i].nq > waiting) waiting = 1 + P[i].nq;
+     }
++    if (frames) { static int first; if (!first++) LOG("[start] first frame committed\n"); }
+     if (frames) { st_wait[waiting]++; st_fcommit++; }   /* frames left waiting behind this one = refreshes of latency */
+     if (frames && queue_wait_us) pthread_cond_broadcast(&qcond);   /* a present held on a full queue may go on */
+     if (P[0].ready || P[1].ready) ready_since = now_us();
+diff --git a/src/resume.c b/src/resume.c
+index dab5657..3cd8096 100644
+--- a/src/resume.c
++++ b/src/resume.c
+@@ -35,6 +35,8 @@ void dsflip_log(const char *fmt, ...);
+ void cpugov_boost(int ms);
+ void dsflip_toast(const char *l1, const char *l2, uint32_t accent, int ms);
+ void audio_mute(int on);
++void audio_hand_off(void);   /* audio.c: the output's last close left to a helper process */
++static void quit_kill(void) { audio_hand_off(); kill(getpid(), SIGKILL); }
+ extern volatile int dsflip_hold;
+ extern volatile int dsflip_stalled;      /* dsflip.c: DraStic hasn't shown a frame for a while (not in a menu) */
+ int menu_is_open(void);
+@@ -254,7 +256,7 @@ static void *save_thread(void *a) {
+     while (!saved && now_ms() - t0 < 5000) usleep(20000);
+     if (saved == 1) dsflip_log("[resume] saved in %lld ms: quitting\n", now_ms() - t0);
+     else dsflip_log("[resume] %s: quitting without one\n", saved ? "the resume state couldn't be written" : "no savestate within 5 s");
+-    kill(getpid(), SIGKILL);
++    quit_kill();
+     return 0;
+ }
+ /* The save runs on DraStic's main thread, at its next frame (resume_frame). Nothing else can make it: if that thread
+@@ -280,7 +282,7 @@ static void on_usr1(int sig) {
+     long long t = now_ms();                              /* clock_gettime: async-signal-safe */
+     /* again (while saving, or a second after a request DraStic hasn't taken: not a key repeat), stalled, or nothing
+      * to save with: now */
+-    if (saving || dsflip_stalled || !resume_path[0] || btn_save < 0 || (want_save && t - usr1_t >= 1000)) kill(getpid(), SIGKILL);
++    if (saving || dsflip_stalled || !resume_path[0] || btn_save < 0 || (want_save && t - usr1_t >= 1000)) quit_kill();
+     if (!want_save) usr1_t = t;
+     want_save = 1;
+     if (quit_watch_on) sem_post(&quit_sem);              /* async-signal-safe */
+@@ -306,7 +308,7 @@ void resume_frame(void) {
+         cpugov_boost(3000);                           /* the top clock from the press on: DraStic compresses ~6.5 MB */
+         unlink(resume_path);
+         resume_press(btn_save);
+-        pthread_t t; if (pthread_create(&t, 0, save_thread, 0)) kill(getpid(), SIGKILL);
++        pthread_t t; if (pthread_create(&t, 0, save_thread, 0)) quit_kill();
+         pthread_setname_np(t, "dsf-resume");
+     }
+     if (want_load && frames >= load_at_frame && !loading) {
+@@ -364,9 +366,14 @@ int resume_menu_load(const char *path, const char *backup, const char *msg, cons
+ /* quit to the menu, with a resume state when that is on: 1 if it saves first */
+ int resume_quit(void) {
+     if (resume_on() && !saving) { if (!want_save) usr1_t = now_ms(); want_save = 1; return 1; }   /* (a hotkey press now is a repeat) */
+-    kill(getpid(), SIGKILL);
++    quit_kill();
+     return 0;
+ }
++/* the menu's Quit without saving: at once, no resume state (the game's own save stays as DraStic last wrote it) */
++void resume_quit_nosave(void) {
++    dsflip_log("[resume] quit without saving\n");
++    quit_kill();
++}
+ static void menu_jobs(void) {
+     if (m_saving && (m_saved || frames - m_t > 300)) {          /* written, failed, or nothing after 5 s */
+         int ok = m_saved == 1; m_saving = 0;
+-- 
+2.56.0
+
+
+From 44975e4c39cc17c4c45db49acc4dfecdcb31aa30 Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 23:24:02 +0200
+Subject: [PATCH 03/12] Resume: DSFLIP_RESUME_ON_QUIT=0, the resume file for
+ SIGUSR1 alone
+
+For BananaOS's Power off after sleeping: asleep long enough, bananad sends SIGUSR1 to drastic, which saves the resume
+state and quits, and the next boot loads it once, even with the menu's Quick resume off. With that off the frontend
+still sets DSFLIP_RESUME_FILE now, so DSFLIP_RESUME_ON_QUIT=0 keeps the player's own quits as they were: the in-game
+menu's Quit and the exit combos quit at once (resume_on() false, so the menu says "back to the menu"), and
+superdrastic-run's stop on SIGTERM kills without a save. Unset or 1: as before. A quit that saves now mutes the audio
+while the game runs on for the save (the menu's Quit did already; a SIGUSR1 from outside, or the exit combo, didn't).
+Checked: syntax (cc -fsyntax-only), sh -n; not on a device.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 7e4106930f898b9100251e028141ce3e7d1e09c4)
+
+ROCKNIXDS (agiacalone fork) conflict notes: our resume_frame keeps its
+cpugov boost and does not mute the audio during a quit's save (no
+change to sound on ROCKNIX). Defaults unchanged: DSFLIP_RESUME_ON_QUIT
+unset = 1. The exit combo's no-save quit goes through quit_kill.
+---
+ docs/INTEGRATION.md     |  7 ++++++-
+ runner/superdrastic-run | 11 ++++++++++-
+ src/resume.c            | 10 ++++++++--
+ 3 files changed, 24 insertions(+), 4 deletions(-)
+
+diff --git a/docs/INTEGRATION.md b/docs/INTEGRATION.md
+index 3e63a50..5950876 100644
+--- a/docs/INTEGRATION.md
++++ b/docs/INTEGRATION.md
+@@ -95,6 +95,11 @@ With DraStic's `backup_in_savestates` on (its default), loading a state also put
+ with: don't load a resume state older than the game's `.dsv` (ROCKNIXDS drops it then). On ROCKNIX the hotkey runs
+ `killall $(cat /tmp/.process-kill-data)`, so writing `-USR1 drastic` there after `start_drastic.sh` has set it is enough.
+ 
++`DSFLIP_RESUME_ON_QUIT=0` keeps the resume file for SIGUSR1 alone: the in-game menu's Quit, the exit combos and
++`superdrastic-run`'s stop on SIGTERM then quit without a save, as with no file. For a frontend whose quick resume is
++off that still wants the game saved before it powers the handheld off by itself (BananaOS's Power off after
++sleeping sends SIGUSR1 to `drastic`, then loads the state once at the next boot).
++
+ **Exit combos.** Holding **Start + Select** or **Menu + Start** for 0.3 seconds quits the same way (with a resume
+ save when `DSFLIP_RESUME_FILE` is set, else at once), like ROCKNIX's gptokeyb did for DraStic. The buttons are the
+ ones `drastic.cfg` maps to `START`, `SELECT` and `MENU` (either control set). `DSFLIP_EXIT_COMBO=0` turns them off.
+@@ -205,7 +210,7 @@ Environment variables, or `superdrastic.conf` beside the launcher (a value there
+ | `DSFLIP_QUEUE` | 1 | Frames that may wait behind the next one, 0-3 (0 = newest only). Each is a refresh (16.7 ms) of input latency, and covers one late frame |
+ | `DSFLIP_QUEUE_WAIT` | 0 (off) | Milliseconds DraStic is held when the queue is full, instead of dropping a frame (20 works; for capped clocks) |
+ | `DSFLIP_LATCH_MARGIN` | 1300 | The shortest time (µs) before a vblank that a frame is committed at (diagnostics) |
+-| `DSFLIP_RESUME_FILE`, `DSFLIP_RESUME_LOAD` | | See *Quitting with a save* |
++| `DSFLIP_RESUME_FILE`, `DSFLIP_RESUME_LOAD`, `DSFLIP_RESUME_ON_QUIT` | , 0, 1 | See *Quitting with a save* |
+ | `DSFLIP_STALL_QUIT` | 20 | Seconds without a frame from DraStic (outside its menu and the in-game menu) before the game is ended; 0 = never. After 5 s the log lists every thread's state and a card says so, and the exit hotkey quits at once |
+ | `DSFLIP_STALL_TEST` | off | Seconds after the first frame at which DraStic's main thread stops for good (tests the stall watch) |
+ | `DSFLIP_NOTICE` | `/tmp/dsflip-notice` | Where that ending leaves a line for the launcher to show |
+diff --git a/runner/superdrastic-run b/runner/superdrastic-run
+index 39737d0..ba0ff0a 100755
+--- a/runner/superdrastic-run
++++ b/runner/superdrastic-run
+@@ -122,7 +122,16 @@ rm -f "$DSFLIP_STATE"
+ # SuperDrastic retries the display for 3 s itself, so no wait here for the frontend to let go
+ ( cd "$WORKDIR" && SDL_VIDEODRIVER=dummy DSFLIP_SHADER="$SHADER" LD_PRELOAD="$LIB${LD_PRELOAD:+:$LD_PRELOAD}" exec "$DRASTIC" "$@" ) &
+ P=$!
+-trap 'kill -9 $P 2>/dev/null; wait $P; put_back; say "stopped by a signal"; exit 143' TERM INT HUP
++# A stop (a shutdown while playing): with a resume file, SIGUSR1 has SuperDrastic save the game there and quit (BananaLinux
++# waits 5 s for that); without one (or with DSFLIP_RESUME_ON_QUIT=0: the frontend sends SIGUSR1 itself when it wants
++# the save), or after 4 s, the game is killed
++stop_game() {
++    if [ -n "$DSFLIP_RESUME_FILE" ] && [ "${DSFLIP_RESUME_ON_QUIT:-1}" != 0 ] && kill -USR1 $P 2>/dev/null; then
++        i=0; while [ $i -lt 40 ] && kill -0 $P 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
++    fi
++    kill -9 $P 2>/dev/null; wait $P; put_back; say "stopped by a signal"; exit 143
++}
++trap stop_game TERM INT HUP
+ # other services (a battery/charger watcher, say) may change the GPU's governor mid-game: put ours back
+ [ -n "$GOV" ] && ( while kill -0 $P 2>/dev/null; do
+     sleep 2
+diff --git a/src/resume.c b/src/resume.c
+index 3cd8096..c2187cc 100644
+--- a/src/resume.c
++++ b/src/resume.c
+@@ -14,6 +14,8 @@
+ // A second SIGUSR1 (the hotkey pressed again), no file within 5 s, or DraStic not taking the request within 3 s (its
+ // main thread stuck: dsflip.c's stall watch) quits at once, without a resume state. DSFLIP_RESUME_TRACE=1 logs
+ // DraStic's savestate file calls.
++// DSFLIP_RESUME_ON_QUIT=0: only SIGUSR1 saves; the in-game menu's Quit and the exit combos quit at once, as without a
++// file (a frontend whose own quick resume is off, that still saves the game before a power-off of its own).
+ #define _GNU_SOURCE
+ #include <dlfcn.h>
+ #include <errno.h>
+@@ -44,6 +46,7 @@ int menu_hint(const char *name, int times);
+ 
+ static char resume_path[512];
+ static int trace;
++static int quit_saves = 1;                            /* DSFLIP_RESUME_ON_QUIT: the player's own quits save too */
+ static volatile int want_save, saving, saved, want_load, loading, load_redirects;
+ static volatile int btn_press, btn_release;          /* joystick button to press now / to release (-1: none) */
+ static long long release_at;                          /* the frame to release it at: DraStic ignores a tap, it wants it held */
+@@ -300,6 +303,7 @@ void resume_frame(void) {
+     if (combo_since && now_ms() - combo_since >= EXIT_HOLD_MS) {
+         combo_since = 0; held_btns = 0;
+         dsflip_log("[resume] exit combo held: quitting\n");
++        if (!quit_saves) quit_kill();
+         on_usr1(SIGUSR1);
+     }
+     if (want_save && !saving) {
+@@ -328,7 +332,7 @@ void resume_frame(void) {
+ 
+ /* ---- the in-game menu (menu.c) ---- */
+ int resume_control_button(const char *name) { return control_button_any(name); }
+-int resume_on(void) { return resume_path[0] && btn_save >= 0; }
++int resume_on(void) { return resume_path[0] && btn_save >= 0 && quit_saves; }   /* the player's quits save */
+ int resume_quit_pending(void) { return want_save; }   /* the exit hotkey came while the menu was open */
+ int resume_menu_busy(void) { return m_saving || m_loading || m_load_next[0] || saving; }
+ int resume_loading(void) { return want_load || loading; }   /* the resume state is due or going in (the menu waits) */
+@@ -399,6 +403,7 @@ void resume_start(void) {
+     btn_start = control_button_any("START"); btn_select = control_button_any("SELECT"); btn_menu = control_button_any("MENU");
+     { const char *x = getenv("DSFLIP_EXIT_COMBO"); exit_combo = !(x && *x == '0'); }
+     if (exit_combo) dsflip_log("[resume] exit combos: start %d + select %d, menu %d + start\n", btn_start, btn_select, btn_menu);
++    { const char *q = getenv("DSFLIP_RESUME_ON_QUIT"); quit_saves = !(q && *q == '0'); }
+     const char *p = getenv("DSFLIP_RESUME_FILE");
+     if (!p || !*p) return;
+     snprintf(resume_path, sizeof resume_path, "%s", p);
+@@ -410,7 +415,8 @@ void resume_start(void) {
+     const char *l = getenv("DSFLIP_RESUME_LOAD");
+     int have = access(resume_path, R_OK) == 0;
+     if (l && *l == '1' && have && btn_load >= 0) { want_load = 1; load_at_frame = 120; }   /* 2 s in: the game runs */
+-    dsflip_log("[resume] quit-with-save on SIGUSR1 (save = button %d, load = button %d)%s\n", btn_save, btn_load,
++    dsflip_log("[resume] quit-with-save on SIGUSR1%s (save = button %d, load = button %d)%s\n",
++               quit_saves ? "" : " only", btn_save, btn_load,
+                want_load ? ", resuming this session" : have ? ", a resume state exists but isn't loaded" : "");
+     if (btn_save < 0) dsflip_log("[resume] DraStic's save-state control isn't a joystick button: SIGUSR1 quits without saving\n");
+ }
+-- 
+2.56.0
+
+
+From 4547d0ba40f6652d1edb49fb34aa82f885201993 Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 00:35:57 +0200
+Subject: [PATCH 04/12] In-game menu: Quit without saving (X on the quit
+ question, asked again), Save and quit staying the first choice
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 3114d3c98264f5f2ffbeb9ddbd3a50059305b185)
+
+ROCKNIXDS (agiacalone fork) conflict notes: ported onto our menu.c
+(our dialog colours and wrap2; no brightness row, so no bri_save_now;
+no default pad map, so X works where drastic.cfg maps X, touch always).
+resume_quit_nosave quits through quit_kill.
+---
+ src/menu.c | 46 +++++++++++++++++++++++++++++++++-------------
+ 1 file changed, 33 insertions(+), 13 deletions(-)
+
+diff --git a/src/menu.c b/src/menu.c
+index 5da97fa..748549e 100644
+--- a/src/menu.c
++++ b/src/menu.c
+@@ -77,6 +77,7 @@ int resume_menu_load(const char *path, const char *backup, const char *msg, cons
+ int resume_menu_busy(void);
+ void resume_press(int b);
+ int resume_quit(void);
++void resume_quit_nosave(void);
+ int resume_on(void);
+ int resume_quit_pending(void);
+ int resume_loading(void);
+@@ -599,10 +600,10 @@ static void load_wav(int id, const char *path) {
+ static void play(int id) { if (snd_ok[id] && sounds_on) audio_ui_play(id); }
+ 
+ /* ---------- state ---------- */
+-enum { SC_MAIN, SC_SAVE, SC_LOAD, SC_SET, SC_QUIT, SC_OVERWRITE, SC_BUSY, SC_MIC };
++enum { SC_MAIN, SC_SAVE, SC_LOAD, SC_SET, SC_QUIT, SC_OVERWRITE, SC_BUSY, SC_MIC, SC_QUIT_NOSAVE };
+ static int enabled = -1, inited, open_, scr, sel_main, sel_slot, sel_set, dirty_top, dirty_bot;
+ static char busy_msg[96];
+-static int btn_menu[2] = { -1, -1 }, b_a = -1, b_b = -1, b_y = -1, b_l = -1, b_r = -1, b_start = -1;
++static int btn_menu[2] = { -1, -1 }, b_a = -1, b_b = -1, b_x = -1, b_y = -1, b_l = -1, b_r = -1, b_start = -1;
+ static int b_up = -1, b_down = -1, b_left = -1, b_right = -1;
+ static long long mic_until, mic_trig;          /* the menu's Blow: held until; last (re)pressed */
+ static const int MIC_SECS[3] = { 1, 3, 10 };
+@@ -858,7 +859,7 @@ static void draw_top(void) {
+ 
+ /* ---------- bottom panel ---------- */
+ typedef struct { int x0, y0, x1, y1; } rect;
+-static rect R_TILE[6], R_SLOT[NSLOT], R_ROW[MAXROWS], R_BAR[MAXROWS], R_FOOT_L, R_FOOT_R, R_HEAD_B, R_DLG_B, R_DLG_A, R_UNDO;
++static rect R_TILE[6], R_SLOT[NSLOT], R_ROW[MAXROWS], R_BAR[MAXROWS], R_FOOT_L, R_FOOT_R, R_HEAD_B, R_DLG_B, R_DLG_A, R_DLG_X, R_UNDO;
+ static int in_rect(rect r, int x, int y) { return x >= r.x0 && x < r.x1 && y >= r.y0 && y < r.y1; }
+ 
+ static void keycap(canvas *c, int x, int y, int sz, const char *k) {   /* the theme's light square with a button letter */
+@@ -893,23 +894,28 @@ static void draw_header(canvas *c, const char *h, const char *sub, int sub_page)
+ static void bar(canvas *c, int x, int y, int v, int sel) {      /* 10 segments, the theme's progress look */
+     for (int k = 0; k < 10; k++) fill(c, x + k * S(15), y, x + k * S(15) + S(11), y + S(20), k < (v + 5) / 10 ? (sel ? C_LIGHT : C_CYAN) : C_LINE, 1.0f);
+ }
+-static void dialog(canvas *c, const char *title, const char *body, const char *no, const char *yes, int danger) {
++/* a question over the page: B no, A yes; with alt, a second row under them: X alt, in red (Quit without saving) */
++static void dialog3(canvas *c, const char *title, const char *body, const char *no, const char *yes, int danger, const char *alt) {
+     fill(c, 0, 0, c->w, c->h, C_DARK, 0.65f);
+-    int w = S(460), h = S(210), x0 = (c->w - w) / 2, y0 = S(120);
++    int w = S(460), h = alt ? S(260) : S(210), x0 = (c->w - w) / 2, y0 = alt ? S(100) : S(120);
+     box(c, x0, y0, x0 + w, y0 + h, S(14), S(3), C_LIGHT, C_DARK);
+     text(c, &F_MED, title, x0 + S(26), y0 + S(22), S(24), C_LIGHT, w - S(52), 0);
+     char l1[200], l2[200]; int n = wrap2(&F_REG, body, S(17), w - S(52), l1, l2, sizeof l1);
+     text(c, &F_REG, l1, x0 + S(26), y0 + S(66), S(17), 0xc2ccd8, w - S(52), 0);
+     if (n > 1) text(c, &F_REG, l2, x0 + S(26), y0 + S(90), S(17), 0xc2ccd8, w - S(52), 0);
+-    int by = y0 + h - S(60);
++    int by = y0 + h - (alt ? S(110) : S(60));
+     R_DLG_A = pill(c, x0 + w - S(24), by, 1, "A", yes, danger ? C_REDL : C_LIGHT, C_LIGHT, danger ? C_RED : C_BLUE);
+     R_DLG_B = pill(c, R_DLG_A.x0 - S(12), by, 1, "B", no, C_GREY, C_LIGHT, 0x243040);
++    R_DLG_X = alt ? pill(c, x0 + w - S(24), by + S(50), 1, "X", alt, C_REDDIM, C_REDL, C_DARK) : (rect){ 0, 0, 0, 0 };
++}
++static void dialog(canvas *c, const char *title, const char *body, const char *no, const char *yes, int danger) {
++    dialog3(c, title, body, no, yes, danger, 0);
+ }
+ static void draw_bottom(void) {
+     canvas *c = &CV[1];
+     dots(c, 0, 0, c->w, c->h, C_BG, C_DOT);
+     int gx0 = S(20), gx1 = c->w - S(20), gy0 = S(58), gy1 = S(404), bw = S(3) < 2 ? 2 : S(3);
+-    int s = scr == SC_OVERWRITE ? SC_SAVE : scr == SC_QUIT ? SC_MAIN : scr;
++    int s = scr == SC_OVERWRITE ? SC_SAVE : scr == SC_QUIT || scr == SC_QUIT_NOSAVE ? SC_MAIN : scr;
+     if (scr == SC_BUSY) {
+         draw_header(c, "Please wait", "", 0);
+         int w = S(420), h = S(150), x0 = (c->w - w) / 2, y0 = S(150);
+@@ -1076,9 +1082,13 @@ static void draw_bottom(void) {
+         char w[48]; when_text(SL[sel_slot].mt, w, sizeof w);
+         char b[160]; snprintf(b, sizeof b, "The save from %s will be replaced by this one.", w);
+         dialog(c, t, b, "Cancel", "Replace", 0);
+-    } else if (scr == SC_QUIT)
+-        dialog(c, "Quit to the menu?", resume_on() ? "Your spot is saved. Next time the game picks up right here."
+-                                                   : "Anything since your last save will be lost.", "Keep playing", "Quit", 1);
++    } else if (scr == SC_QUIT && resume_on())   /* saving the spot is the first choice; quitting without it, under it */
++        dialog3(c, "Quit to the menu?", "Your spot is saved. Next time the game picks up right here.", "Keep playing",
++                "Save and quit", 0, "Quit without saving");
++    else if (scr == SC_QUIT)
++        dialog(c, "Quit to the menu?", "Anything since your last save will be lost.", "Keep playing", "Quit", 1);
++    else if (scr == SC_QUIT_NOSAVE)
++        dialog(c, "Quit without saving?", "Anything since your last save will be lost.", "Cancel", "Quit", 1);
+ }
+ 
+ static void show(int i) {
+@@ -1157,14 +1167,22 @@ static void activate(void) {
+         if (resume_on()) { busy("Saving your spot"); dsflip_hold = 1; audio_mute(1); }
+         close_menu(); resume_quit();
+         break;
++    case SC_QUIT_NOSAVE:
++        play(SND_SELECT); close_menu(); resume_quit_nosave();
++        break;
+     }
+ }
++static void quit_nosave_ask(void) {             /* X on the quit question: Quit without saving, asked again */
++    if (scr != SC_QUIT || !resume_on()) return;
++    scr = SC_QUIT_NOSAVE; play(SND_SELECT); dirty_bot = 1;
++}
+ static void back(void) {
+     play(SND_BACK);
+     switch (scr) {
+     case SC_MAIN: close_menu(); break;
+     case SC_OVERWRITE: scr = SC_SAVE; dirty_bot = 1; break;
+     case SC_QUIT: scr = SC_MAIN; dirty_bot = 1; break;
++    case SC_QUIT_NOSAVE: scr = SC_QUIT; dirty_bot = 1; break;
+     case SC_MIC: scr = SC_SET; dirty_bot = 1; break;
+     default: scr = SC_MAIN; dirty_top = dirty_bot = 1; break;
+     }
+@@ -1197,8 +1215,9 @@ static void nav(int dx, int dy) {
+     if (moved) { play(SND_MOVE); dirty_bot = 1; }
+ }
+ static void tap(int px, int py) {               /* a touch-down on the bottom panel, in panel pixels */
+-    if (scr == SC_OVERWRITE || scr == SC_QUIT) {
++    if (scr == SC_OVERWRITE || scr == SC_QUIT || scr == SC_QUIT_NOSAVE) {
+         if (in_rect(R_DLG_A, px, py)) activate(); else if (in_rect(R_DLG_B, px, py)) back();
++        else if (scr == SC_QUIT && in_rect(R_DLG_X, px, py)) quit_nosave_ask();
+         return;
+     }
+     if (scr == SC_BUSY) return;
+@@ -1271,6 +1290,7 @@ static void handle_sdl(const uint8_t *e) {
+         else if (b == b_a) activate();
+         else if (b == b_b) back();
+         else if (b == b_y && scr == SC_LOAD && undo_ok) do_load(-1);
++        else if (b == b_x && scr == SC_QUIT) quit_nosave_ask();
+         else if (b == b_up) dir_press(0, -1); else if (b == b_down) dir_press(0, 1);
+         else if (b == b_left) dir_press(-1, 0); else if (b == b_right) dir_press(1, 0);
+         else if (b == b_l && scr == SC_SET) adjust(-1); else if (b == b_r && scr == SC_SET) adjust(1);
+@@ -1345,7 +1365,7 @@ static void menu_run(int start) {
+         }
+         if (open_ && held_dir && now_ms() >= rep_next) { nav(rep_dx, rep_dy); rep_next = now_ms() + 110; }
+         { static long long mt; if (scr == SC_MIC && now_ms() - mt >= 33) { mt = now_ms(); dirty_bot = 1; } }   /* the meter moves */
+-        if (now_ms() - clock_t0 >= 15000) { clock_t0 = now_ms(); if (scr == SC_MAIN || scr == SC_SET || scr == SC_QUIT) dirty_top = 1; }   /* the clock */
++        if (now_ms() - clock_t0 >= 15000) { clock_t0 = now_ms(); if (scr == SC_MAIN || scr == SC_SET || scr == SC_QUIT || scr == SC_QUIT_NOSAVE) dirty_top = 1; }   /* the clock */
+         if (open_) redraw();
+         usleep(8000);
+     }
+@@ -1372,7 +1392,7 @@ int menu_event(void *ev) {
+                       int v; if (sscanf(line, "controls_b[CONTROL_INDEX_MENU] = %d", &v) == 1 && v >= 1024 && v < 1088 && v - 1024 != a) btn_menu[1] = v - 1024;
+                       if (sscanf(line, "controls_a[CONTROL_INDEX_MENU] = %d", &v) == 1 && v >= 1024 && v < 1088 && v - 1024 != a && btn_menu[1] < 0) btn_menu[1] = v - 1024; }
+                    fclose(f); } }
+-        b_a = resume_control_button("A"); b_b = resume_control_button("B"); b_y = resume_control_button("Y");
++        b_a = resume_control_button("A"); b_b = resume_control_button("B"); b_x = resume_control_button("X"); b_y = resume_control_button("Y");
+         b_l = resume_control_button("L"); b_r = resume_control_button("R"); b_start = resume_control_button("START");
+         b_up = resume_control_button("UP"); b_down = resume_control_button("DOWN"); b_left = resume_control_button("LEFT"); b_right = resume_control_button("RIGHT");
+         if (btn_menu[0] < 0 && btn_menu[1] < 0) enabled = 0;
+-- 
+2.56.0
+
+
+From 546dac918f3c9d04901bd2d27667aff967f52694 Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 23:06:24 +0200
+Subject: [PATCH 05/12] Low latency (experimental, DSFLIP_LOWLAT=1, off by
+ default): no frame queue, each frame at the next vblank it can make, DraStic
+ held to start its frames as late as the panels allow
+
+DraStic has no savestate API to run ahead with, so the latency taken out is the wait between a finished frame and
+the panels. BananaOS runs a 2-frame queue with latch pacing: up to two refreshes in the queue plus about half a
+refresh to the latch, ~40 ms. With DSFLIP_LOWLAT=1 (over DSFLIP_QUEUE, DSFLIP_QUEUE_WAIT and DSFLIP_PACING):
+
+- a mailbox, no queue and no hold on a full one;
+- a frame is committed the moment it comes while that still makes both panels' next vblank (before the cycle's
+  deadline, latch_hi); one that comes after it waits for the next cycle's deadline, where a newer frame replaces it.
+  Committing it at once would leave every later, on-time frame waiting behind its flip: a refresh more for good;
+- DraStic is held in its present until its next frame, started then, just makes the next deadline (its time from
+  a release to the next present, a decaying maximum, plus a pad that grows by 0.5 ms per missed vblank and comes
+  back after a clean 10 s; with a shader its present->ready time too). It reads its buttons as it starts a frame.
+  The hold lets go early while its sound runs short (the queue hold's audio_floor_us), and never holds while it
+  isn't paced by its sound (its lead past 90 ms, or not known) or while its fast-forward control has toggled it on;
+- the sound closer too: the pump's ring at 1024 frames, ALSA's buffer 20 ms (unless set).
+DSFLIP_LOWLAT_ALIGN=0 leaves the hold out. A [lowlat] line every 10 s: how far before the deadline frames came, the
+late ones, the holds and the ones cut short for the sound. Not measured on the panels yet; uneven frames (2x) show
+as drops a queue would have hidden.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit aa1f632f37c14f4d5a13aa7a331169510975daf4)
+---
+ docs/INTEGRATION.md |   2 +
+ src/dsflip.c        | 137 ++++++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 134 insertions(+), 5 deletions(-)
+
+diff --git a/docs/INTEGRATION.md b/docs/INTEGRATION.md
+index 5950876..0a9cb33 100644
+--- a/docs/INTEGRATION.md
++++ b/docs/INTEGRATION.md
+@@ -209,6 +209,8 @@ Environment variables, or `superdrastic.conf` beside the launcher (a value there
+ | `DSFLIP_CPUGOV_MEMORY` | 1 | 0 = the governor doesn't remember clocks that dropped frames |
+ | `DSFLIP_QUEUE` | 1 | Frames that may wait behind the next one, 0-3 (0 = newest only). Each is a refresh (16.7 ms) of input latency, and covers one late frame |
+ | `DSFLIP_QUEUE_WAIT` | 0 (off) | Milliseconds DraStic is held when the queue is full, instead of dropping a frame (20 works; for capped clocks) |
++| `DSFLIP_LOWLAT` | 0 (off) | 1 = low latency (experimental): no frame queue and no hold on a full one (over `DSFLIP_QUEUE`, `DSFLIP_QUEUE_WAIT`, `DSFLIP_PACING`), each frame committed as soon as it still makes the next vblank (one that comes after that cycle's deadline waits for the next one, where a newer frame replaces it), DraStic held so it starts each frame as late as the panels allow, and the sound buffers shorter (`DSFLIP_PUMP_TARGET` 1024, `DSFLIP_ALSA_LATENCY` 20000 unless set). Frames that come unevenly show as drops a queue would have hidden. The log's `[lowlat]` line every 10 s says how it went |
++| `DSFLIP_LOWLAT_ALIGN` | 1 | 0 = with `DSFLIP_LOWLAT`, DraStic isn't held (only the queue and the latch wait go) |
+ | `DSFLIP_LATCH_MARGIN` | 1300 | The shortest time (µs) before a vblank that a frame is committed at (diagnostics) |
+ | `DSFLIP_RESUME_FILE`, `DSFLIP_RESUME_LOAD`, `DSFLIP_RESUME_ON_QUIT` | , 0, 1 | See *Quitting with a save* |
+ | `DSFLIP_STALL_QUIT` | 20 | Seconds without a frame from DraStic (outside its menu and the in-game menu) before the game is ended; 0 = never. After 5 s the log lists every thread's state and a card says so, and the exit hotkey quits at once |
+diff --git a/src/dsflip.c b/src/dsflip.c
+index 05e3414..32a9c88 100644
+--- a/src/dsflip.c
++++ b/src/dsflip.c
+@@ -150,6 +150,8 @@ volatile long long dsflip_frame_work_max; /* the heaviest frame's CPU time on Dr
+ volatile int dsflip_queue_drops;        /* frames dropped from the queue since start (cpugov.c) */
+ volatile int dsflip_screen_w;           /* DraStic's screen texture width, 256 or 512 (cpugov.c: 1x or 2x) */
+ void cpugov_start(void);
++int resume_control_button(const char *name);   /* resume.c: a DraStic control's joystick button, -1 if none */
++static void lowlat_saw_event(const void *e);
+ void resume_start(void); void resume_frame(void); int resume_poll(void *e); void resume_saw_event(const void *e);   /* resume.c */
+ int menu_event(void *e); void menu_frame(void); int menu_touch_event(int down_change, int down, int x, int y, int xmax, int ymax);   /* menu.c */
+ volatile int dsflip_hold;               /* menu.c: DraStic's frames are dropped, not shown (a load runs behind the menu's screen) */
+@@ -311,6 +313,28 @@ static int pending_mask;                /* bit i: a flip event is still due for
+  * tracking the slow drift between the two clocks) and commits the newest frame at the opposite phase, so the
+  * cut-off sits as far from the presents as possible. DSFLIP_PACING=immediate restores the old behaviour. */
+ static int pacing_latch = 1, tfd = -1;
++/* Low latency (experimental, DSFLIP_LOWLAT=1; off by default). DraStic has no savestate API to run ahead with, so
++ * this takes out the wait between a finished frame and the panels instead:
++ *  - no frame queue (a mailbox: a newer frame replaces one still waiting) and no hold on a full queue;
++ *  - a frame is committed the moment it arrives while that still makes both panels' next vblank (before the cycle's
++ *    deadline, latch_hi()); one that arrives after it waits for the next cycle's deadline, where a newer frame that
++ *    came meanwhile replaces it (committing it at once would make the next, on-time frame wait behind its flip, and
++ *    every frame after it: a refresh more latency for good);
++ *  - DSFLIP_LOWLAT_ALIGN (on): DraStic is held in its present until its next frame, started then, will just make the
++ *    next deadline (the frame's measured time from that release, a decaying maximum, plus a pad that grows on a missed
++ *    vblank). DraStic reads its buttons when it starts a frame, so they're read as late as the panels allow. The hold
++ *    lets DraStic go early while its sound runs short (as the queue's hold: audio_floor_us) and never holds while it
++ *    isn't paced by its sound (fast-forward).
++ * Frames that come unevenly (2x) show as drops and repeats that the queue would have hidden: the price of no queue. */
++static int pacing_lowlat;               /* DSFLIP_LOWLAT=1 */
++static int lowlat_align = 1;            /* DSFLIP_LOWLAT_ALIGN=0: no hold (only the queue and the latch out) */
++static volatile int lowlat_ff;          /* DraStic's fast-forward is on (its control toggled it: see lowlat_saw_event) */
++static int ff_button = -1;              /* DraStic's FAST_FORWARD control, a joystick button (resume.c), -1 if none */
++static long long ll_work;               /* DraStic's time from a release to its next present (us), decaying maximum */
++static long long ll_release;            /* when the last present returned to DraStic (us), 0: not held (no sample) */
++static double ll_pad = 500;             /* us before the deadline a present aims at; +500 per missed vblank, decays */
++static long long ll_shade;              /* shader mode: present -> ready (us), decaying maximum */
++static int st_ll_hold, st_ll_cut, st_ll_late, st_ll_skip; static long long st_ll_hold_us, st_ll_lead_sum; static int st_ll_lead_n;
+ static long long vbl_ref;               /* a recent top-panel vblank (flip timestamp, CLOCK_MONOTONIC us) */
+ static double period = 16666.7;         /* measured refresh period, us */
+ static double ph_c, ph_s;               /* EMA of cos/sin of the present phase */
+@@ -487,7 +511,11 @@ static void on_flip(int f, unsigned seq, unsigned sec, unsigned usec, unsigned c
+         if (i == 0) {
+             if (commit_t && commit_vref && P[0].queued) {  /* did the commit make the first vblank after it? */
+                 double c = fmod((double)(commit_t - commit_vref), period); if (c < 0) c += period;
+-                if ((double)(t - commit_t) > period - c + period / 2) st_miss++;
++                if ((double)(t - commit_t) > period - c + period / 2) {
++                    st_miss++;
++                    /* low latency: the frames aim this much earlier from now on (a slow GPU pass, a late commit) */
++                    if (pacing_lowlat && ph_n >= 600) { ll_pad = fmin(8000, ll_pad + 500); if (latch_margin < 3000) latch_margin += 200; }
++                }
+             }
+             if (vbl_ref) {
+                 double iv = (double)(t - vbl_ref), k = floor(iv / period + 0.5);
+@@ -504,7 +532,11 @@ static void on_flip(int f, unsigned seq, unsigned sec, unsigned usec, unsigned c
+         if (P[i].scan != P[i].queued) release(P[i].scan);
+         P[i].scan = P[i].queued; P[i].scan->state = SCANOUT; P[i].queued = 0;
+     }
+-    if (!pending_mask && (!pacing_latch || ph_n < 120 || latch_skipped)) {
++    if (pacing_lowlat && ph_n >= 120) {
++        /* low latency: a frame that waited behind this flip goes at the deadline (the latch timer, armed when it came),
++         * where a newer one may replace it; nothing is committed here */
++        if (!pending_mask && latch_skipped) { latch_skipped = 0; commit_src = 'C'; if (phase_of(now_us()) <= latch_hi()) try_commit(); }
++    } else if (!pending_mask && (!pacing_latch || ph_n < 120 || latch_skipped)) {
+         /* a skipped latch catches up now, but only while a commit still makes both panels' next vblanks: later in
+          * the cycle (after the bottom panel's flip, when its vblank comes first) it misses one, the next latch finds
+          * that flip pending, catches up after it again, and so on: every latch "late" from then on, and the margin
+@@ -645,6 +677,25 @@ static void arm_latch(void) {         /* with mu held: next latch point after no
+     timerfd_settime(tfd, TFD_TIMER_ABSTIME, &its, 0);
+ }
+ 
++/* low latency: the latch timer at the next deadline after now (the last point of a cycle at which a commit still
++ * makes both panels' next vblanks), for a frame that couldn't go when it came. With mu held. */
++static void ll_arm(void) {
++    if (tfd < 0 || !vbl_ref) return;
++    latch_off = latch_hi();
++    long long now = now_us();
++    double k = ceil(((double)(now - vbl_ref) - latch_off + 300) / period);
++    long long at = vbl_ref + (long long)(k * period + latch_off);
++    struct itimerspec its = { { 0, 0 }, { at / 1000000, (at % 1000000) * 1000 } };
++    timerfd_settime(tfd, TFD_TIMER_ABSTIME, &its, 0);
++}
++/* low latency: a frame is ready (DraStic's present, or the shader's output). At once if that makes the next vblank;
++ * else at the next deadline, unless a newer frame replaces it before. With mu held. */
++static void ll_arrived(void) {
++    int late = phase_of(now_us()) > latch_hi();
++    if (!pending_mask && !late) { commit_src = 'I'; try_commit(); }
++    if (P[0].ready || P[1].ready) { if (late) st_ll_late++; ll_arm(); }
++}
++
+ /* shader mode: draw each panel's newest DraStic buffer into a free output buffer, then publish both together
+  * (one commit shows the same emulated frame on both screens). GL work happens with mu released. */
+ /* diagnostics: DraStic's raw present timing (before any shading), and present -> ready delay in shader mode */
+@@ -716,6 +767,7 @@ static void shade_pending(void) {
+     if (!held_any) note_phase(tr);
+     for (int i = 0; i < 2; i++) if (src[i] && st[i]) {
+         long long l = tr - st[i]; lat_sum += l; lat_n++; if (l > lat_max) lat_max = l;
++        if (l < 2 * (long long)period) { long long d = ll_shade - ll_shade / 128; ll_shade = l > d ? l : d; }
+     }
+     for (int i = 0; i < 2; i++) if (src[i]) {
+         release(src[i]);
+@@ -821,6 +873,7 @@ static void *presenter(void *a) {
+             uint64_t v; if (read(efd, &v, 8) < 0) {}
+             lock(&mu);
+             if (!pacing_latch || ph_n < 120) try_commit();              /* immediate (and while learning) */
++            else if (pacing_lowlat) ll_arrived();
+             else arm_latch();
+             unlock(&mu);
+         }
+@@ -844,7 +897,7 @@ static void *presenter(void *a) {
+                  * 2-4 late latches/s for a whole session at 1700 us (measured 2026-10-01) */
+                 if (commit_latch && latch_off >= latch_hi() - 1 && latch_margin < 5000 && ph_n >= 600) latch_margin += 400;
+             } else { in_latch = 1; commit_src = 'L'; try_commit(); in_latch = 0; }
+-            if (P[0].ready || P[1].ready) arm_latch();
++            if (P[0].ready || P[1].ready) { if (pacing_lowlat) ll_arm(); else arm_latch(); }
+             unlock(&mu);
+         }
+         if (pacing_latch && ph_n >= 120) {                                /* safety net: never sit on a frame */
+@@ -866,7 +919,7 @@ static void *presenter(void *a) {
+             h[16] = 0; memset(ph_hist, 0, sizeof ph_hist);
+             double mean = fmod(atan2(ph_s, ph_c) / (2 * M_PI) * period + period, period);
+             LOG("[pace] mode=%s period=%.1f us, presents at %.0f us after vblank (spread R=%.2f) [%s], latch at %.0f us, margin %.0f us, bottom %+.0f us, late=%d missed=%d\n",
+-                pacing_latch && ph_n >= 120 ? "latch" : "immediate", period, mean, sqrt(ph_c * ph_c + ph_s * ph_s), h, latch_off, latch_margin, bot_off, st_late, st_miss);
++                pacing_lowlat && ph_n >= 120 ? "lowlat" : pacing_latch && ph_n >= 120 ? "latch" : "immediate", period, mean, sqrt(ph_c * ph_c + ph_s * ph_s), h, latch_off, latch_margin, bot_off, st_late, st_miss);
+             if (st_late) {
+                 char ph[96]; size_t m = 0; ph[0] = 0;
+                 for (int k = 0; k < st_late_n; k++) m += snprintf(ph + m, sizeof ph - m, "%s%.1f", k ? " " : "", st_late_ph[k]);
+@@ -908,6 +961,16 @@ static void *presenter(void *a) {
+                 if (n) LOG("\n");
+                 memset(st_wait, 0, sizeof st_wait); st_qwait_n = st_qcut = 0; st_qwait_us = st_qwait_max = 0;
+             }
++            if (pacing_lowlat) {
++                LOG("[lowlat] frames %.1f ms before the deadline on average, %d after it (held to the next); DraStic held "
++                    "%d times (%.1f ms avg), let go early %d times for its sound, not held %d times; its frame %.1f ms, "
++                    "aiming %.1f ms early%s\n",
++                    st_ll_lead_n ? st_ll_lead_sum / 1000.0 / st_ll_lead_n : 0.0, st_ll_late, st_ll_hold,
++                    st_ll_hold ? st_ll_hold_us / 1000.0 / st_ll_hold : 0.0, st_ll_cut, st_ll_skip, ll_work / 1000.0,
++                    (ll_pad + (shader_on ? ll_shade : 0)) / 1000.0, lowlat_ff ? ", fast-forward on" : "");
++                st_ll_hold = st_ll_cut = st_ll_late = st_ll_skip = st_ll_lead_n = 0; st_ll_hold_us = st_ll_lead_sum = 0;
++                if (!st_miss && ll_pad > 500) ll_pad = fmax(500, ll_pad - 250);   /* back after a clean 10 s */
++            }
+             st_late = 0; st_miss = 0; st10 = t;
+             unlock(&mu);
+         }
+@@ -1374,6 +1437,7 @@ int SDL_PollEvent(void *e) {
+     int r = real(e);
+     if (r && e && ok) {
+         resume_saw_event(e);                         /* a save/load state press: CPU boost (resume.c, cpugov.c) */
++        if (pacing_lowlat) lowlat_saw_event(e);      /* DraStic's fast-forward on or off (low latency) */
+         if (menu_event(e)) return 0;                 /* the menu button: the in-game menu (menu.c), not DraStic's */
+     }
+     return r;
+@@ -1646,12 +1710,27 @@ __attribute__((constructor)) static void init(void) {
+     { const char *lm = getenv("DSFLIP_LATCH_MARGIN"); if (lm && atoi(lm) > 0) latch_margin = margin_base = atoi(lm); }
+     { const char *qw = getenv("DSFLIP_QUEUE_WAIT"); if (qw && *qw) queue_wait_us = atoi(qw) * 1000; if (queue_wait_us < 0) queue_wait_us = 0; }
+     { const char *af = getenv("DSFLIP_QUEUE_AUDIO_FLOOR"); if (af && *af) queue_audio_floor_us = atoi(af) * 1000; }
++    {   /* low latency (experimental): over DSFLIP_QUEUE, DSFLIP_QUEUE_WAIT and DSFLIP_PACING */
++        const char *ll = getenv("DSFLIP_LOWLAT");
++        if (ll && *ll == '1' && tfd < 0) tfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
++        if (ll && *ll == '1' && tfd >= 0) {
++            pacing_lowlat = 1; pacing_latch = 1; queue_depth = 0; queue_wait_us = 0;
++            const char *al = getenv("DSFLIP_LOWLAT_ALIGN"); if (al && *al == '0') lowlat_align = 0;
++            ff_button = resume_control_button("FAST_FORWARD");
++            /* the sound a little closer too: the pump's ring at 1024 frames (23 ms) instead of 1536, ALSA's buffer
++             * 20 ms instead of 30 (unless set) */
++            setenv("DSFLIP_PUMP_TARGET", "1024", 0); setenv("DSFLIP_ALSA_LATENCY", "20000", 0);
++            LOG("[lowlat] on (experimental): no frame queue, a frame at the next vblank it can make%s; fast-forward "
++                "control: %s\n", lowlat_align ? ", DraStic held to start each frame as late as the panels allow" : "",
++                ff_button >= 0 ? "a joystick button" : "none found");
++        }
++    }
+     if (queue_depth && queue_wait_us) LOG("[dsflip] pacing: %s, %d-frame queue, a full queue holds DraStic up to %d ms "
+                                           "(while its sound is %s ahead)\n",
+                                           pacing_latch ? "latch (adaptive)" : "immediate", queue_depth, queue_wait_us / 1000,
+                                           queue_audio_floor_us ? "DSFLIP_QUEUE_AUDIO_FLOOR ms" : "its next frame's time + 4 ms");
+     else if (queue_depth) LOG("[dsflip] pacing: %s, %d-frame queue\n", pacing_latch ? "latch (adaptive)" : "immediate", queue_depth);
+-    else LOG("[dsflip] pacing: %s, mailbox\n", pacing_latch ? "latch (adaptive)" : "immediate");
++    else LOG("[dsflip] pacing: %s, mailbox\n", pacing_lowlat ? "low latency" : pacing_latch ? "latch (adaptive)" : "immediate");
+     tdump_x = -1; if (getenv("DSFLIP_TOUCH_DUMP")) touch_dumps = atoi(getenv("DSFLIP_TOUCH_DUMP"));
+     efd = eventfd(0, EFD_CLOEXEC); wfd = eventfd(0, EFD_CLOEXEC);
+     st_t0 = now_us();
+@@ -2064,6 +2143,46 @@ static void perf_draw(dbuf *b, long long tp) {
+         }
+ }
+ 
++/* low latency: hold DraStic (its main thread, in its present) until its next frame, started then, just makes the
++ * next cycle's deadline: as late as the panels allow, so the buttons it reads at the start are as fresh as can be.
++ * tp: when this frame was presented. Never while DraStic isn't paced by its sound (fast-forward: its lead runs far
++ * past the ~35-51 ms it keeps; or not known), and only while its sound stays ahead (audio_floor_us). */
++static void lowlat_hold(long long tp) {
++    lock(&mu);
++    int learned = ph_n >= 120 && vbl_ref;
++    double hi = latch_hi(), ph = learned ? phase_of(tp) : 0, per = period;
++    if (learned) {
++        if (ph <= hi) { st_ll_lead_sum += (long long)(hi - ph); st_ll_lead_n++; }
++    }
++    double pad = ll_pad + (shader_on ? (double)ll_shade : 0);
++    long long work = ll_work;
++    unlock(&mu);
++    long long lead = audio_drastic_lead_us();
++    if (!learned || lowlat_ff || lead >= 90000) { if (learned) st_ll_skip++; return; }
++    /* this frame's own deadline (the first at or after it came), then the next cycle's */
++    double own = (double)tp - ph + hi + (ph > hi ? per : 0);
++    long long target = (long long)(own + per - pad) - work, now = now_us();
++    if (target <= now) { ll_release = now; return; }       /* no time to spare: on at once (and a sample) */
++    long long left = lead - (long long)audio_floor_us();   /* until its sound would run short */
++    if (left <= 0) { st_ll_cut++; return; }                 /* (no sample: it may wait for its sound now) */
++    long long until = target, cut = 0;
++    if (now + left < until) { until = now + left; cut = 1; }
++    if (until - now > (long long)per) until = now + (long long)per;
++    struct timespec ts = { until / 1000000, (until % 1000000) * 1000 };
++    while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, 0) == EINTR) {}
++    st_ll_hold++; st_ll_hold_us += until - now;
++    if (cut) st_ll_cut++;
++    else ll_release = now_us();
++}
++/* low latency: DraStic's fast-forward control (a joystick button, drastic.cfg's CONTROL_INDEX_FAST_FORWARD) toggles
++ * it; while it's on, DraStic isn't held */
++static void lowlat_saw_event(const void *e) {
++    const uint8_t *p = e; uint32_t type; memcpy(&type, p, 4);
++    if (type != 0x603 || ff_button < 0 || p[12] != ff_button) return;   /* SDL_JOYBUTTONDOWN */
++    lowlat_ff = !lowlat_ff;
++    LOG("[lowlat] DraStic's fast-forward %s: %s\n", lowlat_ff ? "on" : "off", lowlat_ff ? "not held" : "held again");
++}
++
+ void SDL_RenderPresent(void *rn) {
+     REAL(void, SDL_RenderPresent, void *);
+     if (!ok) { real(rn); return; }
+@@ -2105,6 +2224,11 @@ void SDL_RenderPresent(void *rn) {
+         stex *s = pending_route[0];
+         if (s && s->kind == K_SCREEN && s->written >= 0 && s->b[s->written].state == WRITTEN) perf_draw(&s->b[s->written], tp);
+     }
++    if (pacing_lowlat && ll_release) {   /* low latency: DraStic's time from its last release to this present */
++        long long w = tp - ll_release;
++        if (w < 2 * (long long)period) { long long d = ll_work - ll_work / 128; ll_work = w > d ? w : d; }
++        ll_release = 0;
++    }
+     {   /* this frame's CPU time on DraStic's main thread (the one presenting) */
+         static long long last; struct timespec ct; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ct);
+         long long c = ct.tv_sec * 1000000000LL + ct.tv_nsec, w = last ? c - last : 0; last = c;
+@@ -2151,10 +2275,12 @@ void SDL_RenderPresent(void *rn) {
+             fclose(f);
+             LOG("[dump] frame %d screen %d %dx%d\n", dsflip_presents, i, s->w, s->h);
+         }
++    int screen = 0;                     /* a game screen went to a panel (low latency: hold DraStic for the next) */
+     for (int i = 0; i < 2; i++) {
+         stex *s = pending_route[i]; pending_route[i] = 0;
+         if (!s) continue;
+         dbuf *b;
++        if (s->kind == K_SCREEN && !dsflip_hold) screen = 1;
+         if (dsflip_hold && s->kind == K_SCREEN) {    /* the menu's screen stays up: this frame is dropped */
+             if (s->written >= 0 && s->b[s->written].state == WRITTEN) s->b[s->written].state = FREE;
+             s->written = -1;
+@@ -2178,6 +2304,7 @@ void SDL_RenderPresent(void *rn) {
+     }
+     unlock(&mu);
+     uint64_t one = 1; if (write(shader_on ? wfd : efd, &one, 8) < 0) {}   /* shader mode: the worker shades first */
++    if (pacing_lowlat && lowlat_align && screen && !menu_touch) lowlat_hold(tp);
+     if (menu_opened) status_card();
+     ra_frame();
+     resume_frame();
+-- 
+2.56.0
+
+
+From 1317461d8d1450c34ade223fc4f4f72091a60ff0 Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 13:41:01 +0100
+Subject: [PATCH 06/12] WIP SuperDrastic low latency: one frame may wait
+ (DSFLIP_LOWLAT_QUEUE), hold counts frames ahead, 60 ms of sound ahead, work
+ floor from DraStic's CPU time, [latency] present -> on screen
+
+Device measurements in progress; not final.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 33c1c6e127f4e1c0043d7159b8c5d28bb5bc63c9)
+---
+ src/dsflip.c | 76 +++++++++++++++++++++++++++++++++++++++++-----------
+ 1 file changed, 60 insertions(+), 16 deletions(-)
+
+diff --git a/src/dsflip.c b/src/dsflip.c
+index 32a9c88..ae7fda4 100644
+--- a/src/dsflip.c
++++ b/src/dsflip.c
+@@ -76,7 +76,8 @@ enum { FREE, WRITING, WRITTEN, READY, QUEUED, SCANOUT };
+ enum { K_SCREEN, K_MENU, K_BLACK };
+ 
+ typedef struct { uint32_t fb, handle, pitch, w, h; uint64_t size; void *map; int state; uint64_t gen;
+-                 int fence; } dbuf;         /* fence: GPU "done" sync_file for a shaded frame, -1 if none */
++                 int fence; unsigned long fseq; } dbuf;   /* fence: GPU "done" sync_file for a shaded frame, -1 if
++                                                              none; fseq: the present it came from (low latency) */
+ typedef struct {                        /* one DraStic texture we scan out */
+     void *tex; int kind, w, h;
+     dbuf b[NBUF]; int nb;
+@@ -334,6 +335,10 @@ static long long ll_work;               /* DraStic's time from a release to its
+ static long long ll_release;            /* when the last present returned to DraStic (us), 0: not held (no sample) */
+ static double ll_pad = 500;             /* us before the deadline a present aims at; +500 per missed vblank, decays */
+ static long long ll_shade;              /* shader mode: present -> ready (us), decaying maximum */
++static unsigned long ll_fseq;           /* presents so far (dbuf.fseq: which present a frame came from) */
++static long long fs_tp[64];             /* each present's time (us), by fseq % 64: present -> on screen, any mode */
++static long long st_p2s_sum, st_p2s_max; static int st_p2s_n;
++static int st_ll_ahead;                 /* holds that waited a refresh more for a frame still waiting ahead */
+ static int st_ll_hold, st_ll_cut, st_ll_late, st_ll_skip; static long long st_ll_hold_us, st_ll_lead_sum; static int st_ll_lead_n;
+ static long long vbl_ref;               /* a recent top-panel vblank (flip timestamp, CLOCK_MONOTONIC us) */
+ static double period = 16666.7;         /* measured refresh period, us */
+@@ -529,6 +534,10 @@ static void on_flip(int f, unsigned seq, unsigned sec, unsigned usec, unsigned c
+         if (!P[i].queued) continue;     /* toast-only flip on this CRTC */
+         if (P[i].last_flip && t - P[i].last_flip > st_iv_max[i]) st_iv_max[i] = t - P[i].last_flip;
+         P[i].last_flip = t; st_flips[i]++; if (!i) shown_total++;
++        if (i == 0 && P[i].queued->fseq && ll_fseq - P[i].queued->fseq < 60) {   /* present -> on screen */
++            long long l = t - fs_tp[P[i].queued->fseq % 64];
++            if (l > 0 && l < 200000) { st_p2s_sum += l; st_p2s_n++; if (l > st_p2s_max) st_p2s_max = l; }
++        }
+         if (P[i].scan != P[i].queued) release(P[i].scan);
+         P[i].scan = P[i].queued; P[i].scan->state = SCANOUT; P[i].queued = 0;
+     }
+@@ -772,7 +781,7 @@ static void shade_pending(void) {
+     for (int i = 0; i < 2; i++) if (src[i]) {
+         release(src[i]);
+         if (bad[i]) { dst[i]->state = FREE; st_drop++; drops_total++; continue; }
+-        dst[i]->state = READY;
++        dst[i]->state = READY; dst[i]->fseq = src[i]->fseq;
+         enqueue(i, dst[i], tr);
+     }
+     unlock(&mu);
+@@ -963,14 +972,17 @@ static void *presenter(void *a) {
+             }
+             if (pacing_lowlat) {
+                 LOG("[lowlat] frames %.1f ms before the deadline on average, %d after it (held to the next); DraStic held "
+-                    "%d times (%.1f ms avg), let go early %d times for its sound, not held %d times; its frame %.1f ms, "
+-                    "aiming %.1f ms early%s\n",
++                    "%d times (%.1f ms avg; %d a refresh more for a frame waiting ahead), let go early %d times for its "
++                    "sound, not held %d times; its frame %.1f ms, aiming %.1f ms early%s\n",
+                     st_ll_lead_n ? st_ll_lead_sum / 1000.0 / st_ll_lead_n : 0.0, st_ll_late, st_ll_hold,
+-                    st_ll_hold ? st_ll_hold_us / 1000.0 / st_ll_hold : 0.0, st_ll_cut, st_ll_skip, ll_work / 1000.0,
++                    st_ll_hold ? st_ll_hold_us / 1000.0 / st_ll_hold : 0.0, st_ll_ahead, st_ll_cut, st_ll_skip, ll_work / 1000.0,
+                     (ll_pad + (shader_on ? ll_shade : 0)) / 1000.0, lowlat_ff ? ", fast-forward on" : "");
+-                st_ll_hold = st_ll_cut = st_ll_late = st_ll_skip = st_ll_lead_n = 0; st_ll_hold_us = st_ll_lead_sum = 0;
++                st_ll_hold = st_ll_cut = st_ll_late = st_ll_skip = st_ll_lead_n = st_ll_ahead = 0; st_ll_hold_us = st_ll_lead_sum = 0;
+                 if (!st_miss && ll_pad > 500) ll_pad = fmax(500, ll_pad - 250);   /* back after a clean 10 s */
+             }
++            if (st_p2s_n) LOG("[latency] DraStic's present -> on screen: %.1f ms on average, %.1f at most (%d frames)\n",
++                              st_p2s_sum / 1000.0 / st_p2s_n, st_p2s_max / 1000.0, st_p2s_n);
++            st_p2s_sum = st_p2s_max = 0; st_p2s_n = 0;
+             st_late = 0; st_miss = 0; st10 = t;
+             unlock(&mu);
+         }
+@@ -1714,13 +1726,22 @@ __attribute__((constructor)) static void init(void) {
+         const char *ll = getenv("DSFLIP_LOWLAT");
+         if (ll && *ll == '1' && tfd < 0) tfd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
+         if (ll && *ll == '1' && tfd >= 0) {
+-            pacing_lowlat = 1; pacing_latch = 1; queue_depth = 0; queue_wait_us = 0;
++            /* one frame may wait behind the next one to go: two that come in one refresh are both shown (a mailbox
++             * dropped the first, a hitch: 14-16 a minute in Mario Kart DS on the RG DS Plus), and the hold aims
++             * DraStic a refresh later per frame still waiting, so the queue drains again instead of staying a refresh
++             * of latency */
++            pacing_lowlat = 1; pacing_latch = 1; queue_depth = 1; queue_wait_us = 0;
++            { const char *lq = getenv("DSFLIP_LOWLAT_QUEUE"); if (lq && *lq) queue_depth = atoi(lq) < 0 ? 0 : atoi(lq) > 2 ? 2 : atoi(lq); }
+             const char *al = getenv("DSFLIP_LOWLAT_ALIGN"); if (al && *al == '0') lowlat_align = 0;
+             ff_button = resume_control_button("FAST_FORWARD");
+             /* the sound a little closer too: the pump's ring at 1024 frames (23 ms) instead of 1536, ALSA's buffer
+-             * 20 ms instead of 30 (unless set) */
++             * 20 ms instead of 30 (unless set). And DraStic keeps 60 ms of sound made ahead instead of its 35: the hold
++             * spends that (DraStic makes no sound while it waits), and with its own 35 it ran down to ~10 ms, under
++             * the floor the hold lets go at, in 13-73% of frames on the RG DS Plus (the hold cut short, the frame
++             * early). Picture to sound stays about as before: +25 ms here, -22 ms in the ring and ALSA's buffer */
+             setenv("DSFLIP_PUMP_TARGET", "1024", 0); setenv("DSFLIP_ALSA_LATENCY", "20000", 0);
+-            LOG("[lowlat] on (experimental): no frame queue, a frame at the next vblank it can make%s; fast-forward "
++            setenv("DSFLIP_AUDIO_AHEAD", "60", 0);
++            LOG("[lowlat] on (experimental): a frame at the next vblank it can make, one more may wait%s; fast-forward "
+                 "control: %s\n", lowlat_align ? ", DraStic held to start each frame as late as the panels allow" : "",
+                 ff_button >= 0 ? "a joystick button" : "none found");
+         }
+@@ -2147,7 +2168,7 @@ static void perf_draw(dbuf *b, long long tp) {
+  * next cycle's deadline: as late as the panels allow, so the buttons it reads at the start are as fresh as can be.
+  * tp: when this frame was presented. Never while DraStic isn't paced by its sound (fast-forward: its lead runs far
+  * past the ~35-51 ms it keeps; or not known), and only while its sound stays ahead (audio_floor_us). */
+-static void lowlat_hold(long long tp) {
++static void lowlat_hold(long long tp, unsigned long mine) {
+     lock(&mu);
+     int learned = ph_n >= 120 && vbl_ref;
+     double hi = latch_hi(), ph = learned ? phase_of(tp) : 0, per = period;
+@@ -2155,19 +2176,40 @@ static void lowlat_hold(long long tp) {
+         if (ph <= hi) { st_ll_lead_sum += (long long)(hi - ph); st_ll_lead_n++; }
+     }
+     double pad = ll_pad + (shader_on ? (double)ll_shade : 0);
+-    long long work = ll_work;
++    /* its frame's time: release -> present, sampled after a hold that ran its course; at least its heaviest recent
++     * frame's CPU time (when every hold is cut short for its sound there's no sample at all: 0 ms, DraStic let go a
++     * frame's time too late, every frame late and queued, measured on the RG DS) */
++    long long work = ll_work, cpu = frame_recent_ns / 1000;
++    if (work < cpu) work = cpu;
++    /* the top panel's frames from earlier presents that still go before this one: each takes a vblank first, so
++     * DraStic's next frame is aimed a refresh later per frame (a burst of two drains instead of staying a refresh
++     * of latency for good, and isn't dropped either). A flip in flight takes this cycle's vblank if it was committed
++     * before its deadline (this frame came by then too). */
++    int ahead = 0;
++    if (P[0].ready && P[0].ready->fseq < mine) ahead++;
++    for (int j = 0; j < P[0].nq; j++) if (P[0].q[j]->fseq < mine) ahead++;
++    if ((pending_mask & 1) && P[0].queued && P[0].queued->fseq < mine && ph <= hi) ahead++;
++    if (ahead > 2) ahead = 2;
++    if (ahead) st_ll_ahead++;
++    {   /* DSFLIP_LOWLAT_DEBUG=n: the first n holds after warm-up, what was counted ahead */
++        static int dbg = -1; if (dbg < 0) { const char *d = getenv("DSFLIP_LOWLAT_DEBUG"); dbg = d ? atoi(d) : 0; }
++        static int seen; if (dbg && learned && ++seen > 600 && seen <= 600 + dbg)
++            LOG("[lowlat-dbg] mine=%lu ph=%.0f hi=%.0f ready=%ld nq=%d q0=%ld pending=%d queued=%ld src=%ld ahead=%d\n", mine, ph, hi,
++                P[0].ready ? (long)P[0].ready->fseq : -1L, P[0].nq, P[0].nq ? (long)P[0].q[0]->fseq : -1L, pending_mask,
++                P[0].queued ? (long)P[0].queued->fseq : -1L, P[0].src ? (long)P[0].src->fseq : -1L, ahead);
++    }
+     unlock(&mu);
+     long long lead = audio_drastic_lead_us();
+-    if (!learned || lowlat_ff || lead >= 90000) { if (learned) st_ll_skip++; return; }
++    if (!learned || lowlat_ff || lead >= 120000) { if (learned) st_ll_skip++; return; }
+     /* this frame's own deadline (the first at or after it came), then the next cycle's */
+-    double own = (double)tp - ph + hi + (ph > hi ? per : 0);
++    double own = (double)tp - ph + hi + (ph > hi ? per : 0) + ahead * per;
+     long long target = (long long)(own + per - pad) - work, now = now_us();
+     if (target <= now) { ll_release = now; return; }       /* no time to spare: on at once (and a sample) */
+     long long left = lead - (long long)audio_floor_us();   /* until its sound would run short */
+     if (left <= 0) { st_ll_cut++; return; }                 /* (no sample: it may wait for its sound now) */
+     long long until = target, cut = 0;
+     if (now + left < until) { until = now + left; cut = 1; }
+-    if (until - now > (long long)per) until = now + (long long)per;
++    if (until - now > (long long)(2 * per)) until = now + (long long)(2 * per);
+     struct timespec ts = { until / 1000000, (until % 1000000) * 1000 };
+     while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, 0) == EINTR) {}
+     st_ll_hold++; st_ll_hold_us += until - now;
+@@ -2276,6 +2318,8 @@ void SDL_RenderPresent(void *rn) {
+             LOG("[dump] frame %d screen %d %dx%d\n", dsflip_presents, i, s->w, s->h);
+         }
+     int screen = 0;                     /* a game screen went to a panel (low latency: hold DraStic for the next) */
++    unsigned long mine = ++ll_fseq;     /* (this present's frames' number: the hold counts the frames ahead of them) */
++    fs_tp[mine % 64] = tp;
+     for (int i = 0; i < 2; i++) {
+         stex *s = pending_route[i]; pending_route[i] = 0;
+         if (!s) continue;
+@@ -2293,7 +2337,7 @@ void SDL_RenderPresent(void *rn) {
+             if (held) continue;
+         } else {
+             if (s->written < 0 || s->b[s->written].state != WRITTEN) continue;
+-            b = &s->b[s->written]; s->written = -1; b->state = READY;
++            b = &s->b[s->written]; s->written = -1; b->state = READY; b->fseq = ll_fseq;
+             if (shader_on && s->kind == K_SCREEN) {   /* the presenter shades it into a panel buffer */
+                 if (P[i].src) { release(P[i].src); st_drop++; drops_total++; st_drop_src++; }
+                 P[i].src = b; P[i].src_t = tp; P[i].src_held = held;
+@@ -2304,7 +2348,7 @@ void SDL_RenderPresent(void *rn) {
+     }
+     unlock(&mu);
+     uint64_t one = 1; if (write(shader_on ? wfd : efd, &one, 8) < 0) {}   /* shader mode: the worker shades first */
+-    if (pacing_lowlat && lowlat_align && screen && !menu_touch) lowlat_hold(tp);
++    if (pacing_lowlat && lowlat_align && screen && !menu_touch) lowlat_hold(tp, mine);
+     if (menu_opened) status_card();
+     ra_frame();
+     resume_frame();
+-- 
+2.56.0
+
+
+From d945846558bf904e45f4e618a2ebcd4c108668ba Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 13:42:16 +0100
+Subject: [PATCH 07/12] DraStic's sound wait sleeps until the pump's next call
+ instead of spinning
+
+audio_sync() polls its ring with delay_us(10), which is SDL_Delay(10 / 1000) = SDL_Delay(0): DraStic's main thread
+spun through it, a syscall at a time, whenever it was ahead of its sound. That spin was counted by cpugov as load
+(Mario Kart DS racing on the RG DS Plus: main thread 76-90% busy at 1992 MHz, 70% at 1416) and kept the top clock.
+The ring only drains when the pump calls DraStic's callback, so an SDL_Delay(0) that returns into audio_sync (matched
+by its code: ldp/ldr/sub after mov w0, #10; bl delay_us; r2.5.2.x at 0x88678 in both the ROCKNIX and BananaOS
+builds) now waits on a futex the pump bumps after each call (at most 8 ms). Other SDL_Delay calls are untouched.
+DSFLIP_AUDIO_WAIT=0: the spin as before. Not with low latency (DSFLIP_LOWLAT=1 paces DraStic itself).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit ea1bcf032c3446f44f828d089fa2a7c10a6fe9aa)
+---
+ src/audio.c  | 20 +++++++++++++++++++-
+ src/dsflip.c | 29 +++++++++++++++++++++++++++++
+ 2 files changed, 48 insertions(+), 1 deletion(-)
+
+diff --git a/src/audio.c b/src/audio.c
+index 9883bac..458f740 100644
+--- a/src/audio.c
++++ b/src/audio.c
+@@ -45,6 +45,8 @@
+ #include <poll.h>
+ #include <fcntl.h>
+ #include <signal.h>
++#include <sys/syscall.h>
++#include <linux/futex.h>
+ #include <unistd.h>
+ 
+ void dsflip_log(const char *fmt, ...);
+@@ -209,6 +211,22 @@ static void ui_mix(unsigned char *buf, int frames) {
+     __atomic_compare_exchange_n(&ui_pos, &p, next, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED);
+ }
+ 
++/* DraStic's sound wait (audio_sync) polls its ring with SDL_Delay(0), a spin: the ring only drains when the pump calls
++ * its callback, so dsflip.c's SDL_Delay hook sleeps here until the pump's next call instead (audio_wait_drain) */
++static int pump_tick, tick_waiters;
++static void tick_bump(void) {
++    __atomic_add_fetch(&pump_tick, 1, __ATOMIC_RELEASE);
++    if (__atomic_load_n(&tick_waiters, __ATOMIC_ACQUIRE)) syscall(SYS_futex, &pump_tick, FUTEX_WAKE_PRIVATE, INT_MAX, 0, 0, 0);
++}
++/* until the pump's next call into DraStic's callback, at most timeout_us */
++void audio_wait_drain(int timeout_us) {
++    int t = __atomic_load_n(&pump_tick, __ATOMIC_ACQUIRE);
++    struct timespec ts = { 0, timeout_us * 1000L };
++    __atomic_add_fetch(&tick_waiters, 1, __ATOMIC_ACQ_REL);
++    syscall(SYS_futex, &pump_tick, FUTEX_WAIT_PRIVATE, t, &ts, 0, 0);
++    __atomic_sub_fetch(&tick_waiters, 1, __ATOMIC_ACQ_REL);
++}
++
+ static double lock_in;                   /* DraStic's rate as taken with DSFLIP_AUDIO_LOCK (see alsa_open), else 0: the pump's
+                                             nominal rate too, so its trim stays the few ppm it is without the lock */
+ static void *pump(void *a) {             /* steady calls into DraStic's callback */
+@@ -229,7 +247,7 @@ static void *pump(void *a) {             /* steady calls into DraStic's callback
+             if (av < chunk) { st_dshort++; st_dshort_fr += chunk - av; audio_runouts++; }
+         }
+         if (paused) memset(tmp, 0, (size_t)chunk * fb);   /* the menu's sounds over silence (16-bit samples) */
+-        else { dcb(dud, tmp, chunk * fb); if (mute) memset(tmp, 0, (size_t)chunk * fb); }
++        else { dcb(dud, tmp, chunk * fb); tick_bump(); if (mute) memset(tmp, 0, (size_t)chunk * fb); }
+         sfx_mix(tmp, chunk);
+         ui_mix(tmp, chunk);
+         st_pump++; st_pumped += chunk;
+diff --git a/src/dsflip.c b/src/dsflip.c
+index ae7fda4..6ffc6a3 100644
+--- a/src/dsflip.c
++++ b/src/dsflip.c
+@@ -1812,6 +1812,35 @@ int SDL_Init(uint32_t flags) {
+     if (ok && (flags & 0x10 /* SDL_INIT_AUDIO */) && audio_pump_enabled() && audio_out_alsa()) { flags &= ~0x10u; audio_sdl_off = 1; }
+     return real(flags);
+ }
++/* DraStic's sound wait, audio_sync(): "while its ring is 3/4 full or more: delay_us(10)", and delay_us(10) is
++ * SDL_Delay(10 / 1000) = SDL_Delay(0), so the main thread spins through it, a syscall at a time, whenever DraStic is
++ * ahead of its sound: most of every frame in a light scene. That spin was most of the main thread's CPU time (Mario
++ * Kart DS racing: 76-90% busy at 1992 MHz, 70% at 1416), which cpugov read as load and kept the top clock for. The
++ * ring drains only when the pump calls DraStic's callback, so that SDL_Delay(0) sleeps until the pump's next call
++ * (audio.c, at most 8 ms). Recognised by the code it returns to (delay_us tail-calls SDL_Delay, so the return address
++ * is in audio_sync, after "mov w0, #10; bl delay_us": "ldp w0, w1, [x19, #8]; ldr w2, [x19, #24]; sub w1, w1, w0",
++ * r2.5.2.x at 0x88678). Any other SDL_Delay goes through as it was. DSFLIP_AUDIO_WAIT=0: the spin as before; not with
++ * low latency, which paces DraStic itself. */
++void audio_wait_drain(int timeout_us);
++static int audio_wait = -1;
++static const uint32_t *sync_ra;
++static int is_audio_sync(const uint32_t *ra) {
++    return ra[0] == 0x29410660u && ra[1] == 0xb9401a62u && ra[2] == 0x4b000021u && ra[-2] == 0x52800140u &&
++           (ra[-1] >> 26) == 0x25;                       /* bl */
++}
++void SDL_Delay(uint32_t ms) {
++    REAL(void, SDL_Delay, uint32_t);
++    if (!ms && pump_on && !pacing_lowlat) {
++        if (audio_wait < 0) { const char *e = getenv("DSFLIP_AUDIO_WAIT"); audio_wait = !(e && *e == '0'); }
++        const uint32_t *ra = __builtin_return_address(0);
++        if (audio_wait && (ra == sync_ra || (!sync_ra && is_audio_sync(ra)))) {
++            if (!sync_ra) { sync_ra = ra; LOG("[audio] DraStic's sound wait sleeps until the pump's next call (was a spin)\n"); }
++            audio_wait_drain(8000);
++            return;
++        }
++    }
++    real(ms);
++}
+ struct SDL_AudioSpec_ { int freq; unsigned short format; unsigned char channels, silence;
+     unsigned short samples, padding; uint32_t size; void (*callback)(void *, unsigned char *, int); void *userdata; };
+ int SDL_OpenAudio(struct SDL_AudioSpec_ *want, struct SDL_AudioSpec_ *have) {
+-- 
+2.56.0
+
+
+From 396c8dd01a80521cd0db08eccfdc75ada8e8a35d Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 13:42:16 +0100
+Subject: [PATCH 08/12] cpugov: no strike for a frame that would be late at the
+ top clock too; a low clock while the in-game menu is up; DSFLIP_CPUGOV_SUM
+
+- A drop (or a slow window) right after a frame that would have taken more than a refresh at the top clock too
+  (Mario Kart DS's race start: 150-250% of 16.7 ms) is no clock's fault: no strike, not remembered. Such strikes
+  had banned 1800 MHz for Mario Kart DS, and a banned next step blocks every step down: the race stayed at 1992.
+- The in-game menu (DraStic paused, the menu draws on a press, each press boosts) runs at DSFLIP_CPUGOV_MENU kHz
+  (816000; 0 = off) and the game's clock comes back when it closes.
+- DSFLIP_CPUGOV_SUM: the cores' worth of DraStic threads above which no step down is taken (1.2 as before).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 05beb60c0927ed2ff747d3d4db7ff28451538888)
+
+ROCKNIXDS (agiacalone fork) conflict notes: our governor's strike rule
+stays the default. The spike rule (no strike for a frame that would be
+late at the top clock too) is OFF unless DSFLIP_CPUGOV_SPIKE=1, on both
+the dropped and the slow paths. DSFLIP_CPUGOV_SUM keeps 1.2. The menu
+clock becomes opt-in with 853021e (next).
+---
+ src/cpugov.c | 33 ++++++++++++++++++++++++++++++---
+ src/menu.c   |  3 +++
+ 2 files changed, 33 insertions(+), 3 deletions(-)
+
+diff --git a/src/cpugov.c b/src/cpugov.c
+index faa202c..a4ec1e3 100644
+--- a/src/cpugov.c
++++ b/src/cpugov.c
+@@ -98,8 +98,14 @@ static long long now_ns;
+ static int verbose;
+ static int hwmax_;                           /* the hardware's top clock (savestate boosts, a soft DSFLIP_CPU_MAX) */
+ static int soft_max;                         /* DSFLIP_CPU_MAX_SOFT=1: fmax_ may be passed when the game needs it */
++static int spike_rule;                       /* DSFLIP_CPUGOV_SPIKE=1 (ROCKNIXDS fork: off by default): a frame that would
++                                               be late at the top clock too is no strike (the BananaOS line's rule) */
++static double sum_max = 1.2;                 /* DSFLIP_CPUGOV_SUM: no step down when all of DraStic's threads together
++                                               would exceed this many cores at the lower clock */
+ static volatile long long boost_until;       /* CLOCK_MONOTONIC ns: boosted until then (cpugov_boost) */
+ static volatile int gov_on;
++static volatile int menu_open;               /* the in-game menu is up (menu.c): DraStic is paused */
++static int menu_khz = 816000;                /* DSFLIP_CPUGOV_MENU: the clock while it is (0: leave the clock to the model) */
+ 
+ /* how long a clock's (k+1)th drop keeps it banned */
+ static long long ban_ns(int k) {
+@@ -204,6 +210,7 @@ static void *gov_thread(void *a) {
+     double peaks[FPS_WINDOWS] = { 0 };                  /* the heaviest frame of each of the last windows (1 s) */
+     int w_cand = 0, w_stable = 0;                        /* DraStic's screen width, and for how many windows */
+     int boosted = 0;                                     /* during a savestate boost: the clock to go back to */
++    int menu_from = 0;                                   /* while the in-game menu is up: the game's clock, for after */
+     for (;;) {
+         if (--rescan <= 0) {                             /* DraStic's threads (not ours: dsf-*), once a second */
+             DIR *d = opendir("/proc/self/task"); struct dirent *e; int n = 0; int nt_[MAXT]; long long nl[MAXT];
+@@ -239,6 +246,7 @@ static void *gov_thread(void *a) {
+                 if (!boosted) { boosted = cur; dsflip_log("[cpugov] boost (a savestate, the menu, the volume keys): %d MHz until it's done\n", hwmax_ / 1000); }
+                 cur = hwmax_;
+             } else {
++                if (menu_from && !menu_open) { boosted = menu_from; menu_from = 0; }   /* the menu closed meanwhile */
+                 dsflip_log("[cpugov] boost done: back to %d MHz\n", boosted / 1000);
+                 if (wr_int(POL "scaling_max_freq", boosted) == 0) cur = boosted;
+                 boosted = 0;
+@@ -248,6 +256,16 @@ static void *gov_thread(void *a) {
+             drops_prev = dsflip_queue_drops; runouts_prev = audio_runouts; low = 0; down_t = 0;
+             continue;
+         }
++        /* the in-game menu: DraStic is paused and the menu draws only on a press (each press boosts, menu.c), so a low
++         * clock while it is up, and the game's clock back when it closes; nothing counts meanwhile */
++        if (menu_khz && (menu_open || menu_from)) {
++            if (menu_open) { if (!menu_from) { menu_from = cur ? cur : fmax_; set_clock(menu_khz, "in-game menu", umax, fps); } }
++            else { set_clock(menu_from, "in-game menu closed", umax, fps); menu_from = 0; }
++            for (int k = 0; k < FPS_WINDOWS; k++) { fps_t[k] = 0; peaks[k] = 0; }
++            __atomic_exchange_n(&dsflip_frame_work_max, 0, __ATOMIC_RELAXED);
++            drops_prev = dsflip_queue_drops; runouts_prev = audio_runouts; low = 0; down_t = 0;
++            continue;
++        }
+         /* the memory for the resolution DraStic settled on (it starts at 1x and switches to 2x a moment later; the
+          * player can switch in its menu): once it has held for 1 s. No stepping down before that. */
+         { int w = dsflip_screen_w; if (w != w_cand) { w_cand = w; w_stable = 0; } else w_stable++;
+@@ -287,7 +305,10 @@ static void *gov_thread(void *a) {
+         else if (dropped) {
+             /* up one step either way (at 816 MHz frames were dropped with the heaviest at only ~40% of a refresh, in a
+              * still HeartGold dialog; the floor is 1104 now), but only a CPU-bound drop is a strike (see the top) */
+-            int blame = peak1s >= BLAME_PEAK || umax > TARGET;
++            /* a frame that would have been late at the top clock too (a load, a scene change: Mario Kart DS's race
++             * start runs 150-250% of a refresh) is no clock's fault: not a strike */
++            int spike = spike_rule && peak1s * cur / hwmax_ > 1.0;
++            int blame = !spike && (peak1s >= BLAME_PEAK || umax > TARGET);
+             why = blame ? "dropped" : "dropped, light frames"; if (want <= cur) want = blame ? step_up(cur) : fit(cur + 1);
+             int c = idx(cur);
+             int top = soft_max ? hwmax_ : fmax_;         /* (at the top there's nothing to avoid: not held against it) */
+@@ -309,7 +330,7 @@ static void *gov_thread(void *a) {
+             if (want > top) want = top;
+             if (want <= cur) want = fit_to(cur + 1, top);                                     /* +1 step... */
+             int c = idx(cur);                                                                /* ...and the clock that was */
+-            if (c >= 0 && cur < top && cpu) { bad_until[c] = t + ban_ns(strikes[c]); strikes[c]++; mem_save(); }   /* too slow is held
++            if (c >= 0 && cur < top && cpu && !(spike_rule && peak1s * cur / hwmax_ > 1.0)) { bad_until[c] = t + ban_ns(strikes[c]); strikes[c]++; mem_save(); }   /* too slow is held
+                 against it like a drop: stepping back down to it after 15 s "light" and up again made a 1104/1416 see-saw */
+             else if (c >= 0 && cur < top && bad_until[c] < t + ban_ns(0)) bad_until[c] = t + ban_ns(0);
+         }
+@@ -323,7 +344,7 @@ static void *gov_thread(void *a) {
+             if (forgiven) mem_save();
+         }
+         if (why && want > cur) { set_clock(want, why, umax, fps); low = 0; }
+-        else if (fits < cur && fps >= 59 && usum < 1.2 * cur / (double)step_down(cur) && (!mem_on || mem_w)) {   /* never while below full speed, nor
++        else if (fits < cur && fps >= 59 && usum < sum_max * cur / (double)step_down(cur) && (!mem_on || mem_w)) {   /* never while below full speed, nor
+                  when all of DraStic's threads together would exceed 1.2 cores at the lower clock */
+             if (++low >= DOWN_AFTER) { int from = cur; set_clock(step_down(cur), "light", umax, fps); low = 0; if (cur < from) { down_t = t; down_from = from; } } }
+         else low = 0;
+@@ -338,6 +359,9 @@ void cpugov_start(void) {
+     if (e && *e == '0') { dsflip_log("[cpugov] off (DSFLIP_CPUGOV=0)\n"); return; }
+     verbose = getenv("DSFLIP_CPUGOV_LOG") != 0;
+     { const char *m = getenv("DSFLIP_CPUGOV_MEMORY"); mem_on = !(m && *m == '0'); }
++    { const char *m = getenv("DSFLIP_CPUGOV_MENU"); if (m) menu_khz = atoi(m); }
++    { const char *m = getenv("DSFLIP_CPUGOV_SUM"); if (m && atof(m) > 0) sum_max = atof(m); }
++    { const char *m = getenv("DSFLIP_CPUGOV_SPIKE"); spike_rule = m && *m == '1'; }
+     char gov[32], avail[256];
+     rd_str(POL "scaling_governor", gov, sizeof gov);
+     if (strcmp(gov, "performance")) { dsflip_log("[cpugov] off: governor is %s, not performance\n", gov); return; }
+@@ -378,3 +402,6 @@ void cpugov_boost(int ms) {
+     boost_until = until;
+     if (fresh) wr_int(POL "scaling_max_freq", hwmax_);  /* at once, not at the governor's next window */
+ }
++
++/* the in-game menu opened (1) or closed (0) (menu.c) */
++void cpugov_menu(int open) { menu_open = open; }
+diff --git a/src/menu.c b/src/menu.c
+index 748549e..eec1552 100644
+--- a/src/menu.c
++++ b/src/menu.c
+@@ -52,6 +52,7 @@ int audio_mic_sample_ms(void);
+ void dsflip_toast(const char *l1, const char *l2, uint32_t accent, int ms);
+ void dsflip_log(const char *fmt, ...);
+ void cpugov_boost(int ms);
++void cpugov_menu(int open);
+ void SDL_PauseAudio(int on);
+ void dsflip_perf_mode(int m);
+ int dsflip_shader_switch(const char *name);
+@@ -1341,6 +1342,7 @@ static void menu_run(int start) {
+     SDL_PauseAudio(1);
+     audio_mic_quiet(1);             /* the real mic presses nothing while the game is paused */
+     cpugov_boost(800);
++    cpugov_menu(1);
+     open_ = 1; scr = SC_MAIN; sel_main = 0; held_dir = 0; axis_dir[0] = axis_dir[1] = 0; tqn = 0;
+     bri_dirty = 0; make_rows(); shaders_load(); sh_sel = sh_active;
+     scan_slots(0);
+@@ -1375,6 +1377,7 @@ static void menu_run(int start) {
+     if (mic_until) { audio_mic_hold(1); mic_trig = now_ms(); }
+     SDL_PauseAudio(0);
+     audio_mic_quiet(0);
++    cpugov_menu(0);
+     dsflip_log("[menu] closed\n");
+ }
+ 
+-- 
+2.56.0
+
+
+From 337a49f2586725bdab7afe2bc97e7fc4d3cf509a Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 14:22:39 +0100
+Subject: [PATCH 09/12] Low latency docs: one frame may wait, the hold counts
+ frames ahead, 60 ms of sound ahead; measured numbers
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01H8n9VeJ5ko2nP6SWo4NDqL
+(cherry picked from commit cd1e6a9f3f31a0fd1faf22dc3ee97f1d61dc07dc)
+---
+ docs/INTEGRATION.md | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/docs/INTEGRATION.md b/docs/INTEGRATION.md
+index 0a9cb33..00e7745 100644
+--- a/docs/INTEGRATION.md
++++ b/docs/INTEGRATION.md
+@@ -209,7 +209,8 @@ Environment variables, or `superdrastic.conf` beside the launcher (a value there
+ | `DSFLIP_CPUGOV_MEMORY` | 1 | 0 = the governor doesn't remember clocks that dropped frames |
+ | `DSFLIP_QUEUE` | 1 | Frames that may wait behind the next one, 0-3 (0 = newest only). Each is a refresh (16.7 ms) of input latency, and covers one late frame |
+ | `DSFLIP_QUEUE_WAIT` | 0 (off) | Milliseconds DraStic is held when the queue is full, instead of dropping a frame (20 works; for capped clocks) |
+-| `DSFLIP_LOWLAT` | 0 (off) | 1 = low latency (experimental): no frame queue and no hold on a full one (over `DSFLIP_QUEUE`, `DSFLIP_QUEUE_WAIT`, `DSFLIP_PACING`), each frame committed as soon as it still makes the next vblank (one that comes after that cycle's deadline waits for the next one, where a newer frame replaces it), DraStic held so it starts each frame as late as the panels allow, and the sound buffers shorter (`DSFLIP_PUMP_TARGET` 1024, `DSFLIP_ALSA_LATENCY` 20000 unless set). Frames that come unevenly show as drops a queue would have hidden. The log's `[lowlat]` line every 10 s says how it went |
++| `DSFLIP_LOWLAT` | 0 (off) | 1 = low latency (experimental): one frame may wait behind the next one to go (`DSFLIP_LOWLAT_QUEUE`, 0-2; over `DSFLIP_QUEUE`, `DSFLIP_QUEUE_WAIT`, `DSFLIP_PACING`), each frame committed as soon as it still makes the next vblank, DraStic held so it starts each frame as late as the panels allow (a refresh later per frame still waiting, so a burst drains instead of staying a refresh of latency), and DraStic keeps 60 ms of sound ahead for the hold (`DSFLIP_AUDIO_AHEAD`) while the pump's ring and ALSA's buffer are shorter (`DSFLIP_PUMP_TARGET` 1024, `DSFLIP_ALSA_LATENCY` 20000; all unless set). Measured in Mario Kart DS on the RG DS: DraStic's frame on the panels 26-30 ms after it is presented instead of 50-56. The log's `[lowlat]` line every 10 s says how it went; `[latency]` (any mode) gives present -> on screen |
++| `DSFLIP_LOWLAT_QUEUE` | 1 | with `DSFLIP_LOWLAT`: frames that may wait (2 measured 39-47 ms, close to no low latency at all) |
+ | `DSFLIP_LOWLAT_ALIGN` | 1 | 0 = with `DSFLIP_LOWLAT`, DraStic isn't held (only the queue and the latch wait go) |
+ | `DSFLIP_LATCH_MARGIN` | 1300 | The shortest time (µs) before a vblank that a frame is committed at (diagnostics) |
+ | `DSFLIP_RESUME_FILE`, `DSFLIP_RESUME_LOAD`, `DSFLIP_RESUME_ON_QUIT` | , 0, 1 | See *Quitting with a save* |
+-- 
+2.56.0
+
+
+From 4907ed09e17125034f92cab6a07265e14a380e63 Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 14:28:23 +0100
+Subject: [PATCH 10/12] Sleeping sound wait and in-game menu clock OFF by
+ default (DSFLIP_AUDIO_WAIT=1, DSFLIP_CPUGOV_MENU=<kHz> turn them on)
+
+Only one A/B pair of the sound wait was measured (team run 2026-10-25) and the menu clock none: opt-in until both are.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01H8n9VeJ5ko2nP6SWo4NDqL
+(cherry picked from commit 853021e708e70c7265951ff2289271356e8866bd)
+---
+ src/cpugov.c | 3 ++-
+ src/dsflip.c | 6 +++---
+ 2 files changed, 5 insertions(+), 4 deletions(-)
+
+diff --git a/src/cpugov.c b/src/cpugov.c
+index a4ec1e3..76ad750 100644
+--- a/src/cpugov.c
++++ b/src/cpugov.c
+@@ -105,7 +105,8 @@ static double sum_max = 1.2;                 /* DSFLIP_CPUGOV_SUM: no step down
+ static volatile long long boost_until;       /* CLOCK_MONOTONIC ns: boosted until then (cpugov_boost) */
+ static volatile int gov_on;
+ static volatile int menu_open;               /* the in-game menu is up (menu.c): DraStic is paused */
+-static int menu_khz = 816000;                /* DSFLIP_CPUGOV_MENU: the clock while it is (0: leave the clock to the model) */
++static int menu_khz;                         /* DSFLIP_CPUGOV_MENU=<kHz> (e.g. 816000): the clock while it is (default 0, off: the model's
++                                               clock; not measured on a device yet) */
+ 
+ /* how long a clock's (k+1)th drop keeps it banned */
+ static long long ban_ns(int k) {
+diff --git a/src/dsflip.c b/src/dsflip.c
+index 6ffc6a3..39f95e7 100644
+--- a/src/dsflip.c
++++ b/src/dsflip.c
+@@ -1819,8 +1819,8 @@ int SDL_Init(uint32_t flags) {
+  * ring drains only when the pump calls DraStic's callback, so that SDL_Delay(0) sleeps until the pump's next call
+  * (audio.c, at most 8 ms). Recognised by the code it returns to (delay_us tail-calls SDL_Delay, so the return address
+  * is in audio_sync, after "mov w0, #10; bl delay_us": "ldp w0, w1, [x19, #8]; ldr w2, [x19, #24]; sub w1, w1, w0",
+- * r2.5.2.x at 0x88678). Any other SDL_Delay goes through as it was. DSFLIP_AUDIO_WAIT=0: the spin as before; not with
+- * low latency, which paces DraStic itself. */
++ * r2.5.2.x at 0x88678). Any other SDL_Delay goes through as it was. OFF by default for now (DSFLIP_AUDIO_WAIT=1 turns
++ * it on: one A/B pair measured, 2026-10-25); not with low latency, which paces DraStic itself. */
+ void audio_wait_drain(int timeout_us);
+ static int audio_wait = -1;
+ static const uint32_t *sync_ra;
+@@ -1831,7 +1831,7 @@ static int is_audio_sync(const uint32_t *ra) {
+ void SDL_Delay(uint32_t ms) {
+     REAL(void, SDL_Delay, uint32_t);
+     if (!ms && pump_on && !pacing_lowlat) {
+-        if (audio_wait < 0) { const char *e = getenv("DSFLIP_AUDIO_WAIT"); audio_wait = !(e && *e == '0'); }
++        if (audio_wait < 0) { const char *e = getenv("DSFLIP_AUDIO_WAIT"); audio_wait = e && *e == '1'; }
+         const uint32_t *ra = __builtin_return_address(0);
+         if (audio_wait && (ra == sync_ra || (!sync_ra && is_audio_sync(ra)))) {
+             if (!sync_ra) { sync_ra = ra; LOG("[audio] DraStic's sound wait sleeps until the pump's next call (was a spin)\n"); }
+-- 
+2.56.0
+
+
+From ee81b2ca7b1c3541d80883aad03ce397146c10ef Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 12:49:58 +0100
+Subject: [PATCH 11/12] low latency: DraStic no longer held to start late by
+ default (DSFLIP_LOWLAT_ALIGN=1 to have it), and why
+
+The hold (lowlat_hold) was cut short by DraStic's sound in nearly every frame: DraStic keeps only ~25 ms of
+sound ahead of the pump at its present (15 ms at least: the pump's ring holds the rest), the hold wanted 13-19 ms
+on average and the sound's floor is 8-25 ms ("let go early" 590-600 of 600 per 10 s in every run). Cut short, the
+frame came after its deadline anyway (250-400 of 600 "held to the next"), waited a refresh more, and the next hold
+aimed past that one: drops and hitches. Off by default now; the [lowlat] 10 s line gains DraStic's sound at its
+present, the floor and the hold wanted, to look at it again.
+
+RG DS, Mario Kart DS (QA's cold-start route: A taps through the menus into a race), DSFLIP_LOWLAT=1, 60 s held:
+  before (4 runs): hitch seconds (a flip gap > 25 ms) 13 / 1 / 29 / 8, drops after the start 28 / 4 / 90 / 26
+  after (3 runs):  hitch seconds 0 / 1 / 0, drops 0 / 0 / 0 (DSFLIP_LOWLAT=0: 0 and 0)
+  present -> screen 22-28 ms before, 25-30 after (off: 53)
+RG DS, Golden Sun: Dark Dawn intro: hitch 2, drops 4 -> 0, 0; present -> screen 25.9 -> 24.9 ms.
+RG DS Plus: no change either way (hitch seconds 11-19 before, 16-17 after; off 10): DraStic runs 60.0 frames a
+second against the Plus's 60.17 Hz panels, and its frames come bunched; low latency there stays rougher than off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01StxwK2MT4YoKvLdgJ4FmuR
+(cherry picked from commit 68eae5067314b60d152387971d2d99f128f76f87)
+---
+ docs/INTEGRATION.md |  4 ++--
+ src/dsflip.c        | 18 +++++++++++++++---
+ 2 files changed, 17 insertions(+), 5 deletions(-)
+
+diff --git a/docs/INTEGRATION.md b/docs/INTEGRATION.md
+index 00e7745..e8e9473 100644
+--- a/docs/INTEGRATION.md
++++ b/docs/INTEGRATION.md
+@@ -209,9 +209,9 @@ Environment variables, or `superdrastic.conf` beside the launcher (a value there
+ | `DSFLIP_CPUGOV_MEMORY` | 1 | 0 = the governor doesn't remember clocks that dropped frames |
+ | `DSFLIP_QUEUE` | 1 | Frames that may wait behind the next one, 0-3 (0 = newest only). Each is a refresh (16.7 ms) of input latency, and covers one late frame |
+ | `DSFLIP_QUEUE_WAIT` | 0 (off) | Milliseconds DraStic is held when the queue is full, instead of dropping a frame (20 works; for capped clocks) |
+-| `DSFLIP_LOWLAT` | 0 (off) | 1 = low latency (experimental): one frame may wait behind the next one to go (`DSFLIP_LOWLAT_QUEUE`, 0-2; over `DSFLIP_QUEUE`, `DSFLIP_QUEUE_WAIT`, `DSFLIP_PACING`), each frame committed as soon as it still makes the next vblank, DraStic held so it starts each frame as late as the panels allow (a refresh later per frame still waiting, so a burst drains instead of staying a refresh of latency), and DraStic keeps 60 ms of sound ahead for the hold (`DSFLIP_AUDIO_AHEAD`) while the pump's ring and ALSA's buffer are shorter (`DSFLIP_PUMP_TARGET` 1024, `DSFLIP_ALSA_LATENCY` 20000; all unless set). Measured in Mario Kart DS on the RG DS: DraStic's frame on the panels 26-30 ms after it is presented instead of 50-56. The log's `[lowlat]` line every 10 s says how it went; `[latency]` (any mode) gives present -> on screen |
++| `DSFLIP_LOWLAT` | 0 (off) | 1 = low latency (experimental): one frame may wait behind the next one to go (`DSFLIP_LOWLAT_QUEUE`, 0-2; over `DSFLIP_QUEUE`, `DSFLIP_QUEUE_WAIT`, `DSFLIP_PACING`), each frame committed as soon as it still makes the next vblank (and, with `DSFLIP_LOWLAT_ALIGN=1`, DraStic held so it starts each frame as late as the panels allow), and DraStic keeps 60 ms of sound ahead (`DSFLIP_AUDIO_AHEAD`) while the pump's ring and ALSA's buffer are shorter (`DSFLIP_PUMP_TARGET` 1024, `DSFLIP_ALSA_LATENCY` 20000; all unless set). Measured in Mario Kart DS on the RG DS: DraStic's frame on the panels ~30-33 ms after it is presented instead of 50-56. The log's `[lowlat]` line every 10 s says how it went; `[latency]` (any mode) gives present -> on screen |
+ | `DSFLIP_LOWLAT_QUEUE` | 1 | with `DSFLIP_LOWLAT`: frames that may wait (2 measured 39-47 ms, close to no low latency at all) |
+-| `DSFLIP_LOWLAT_ALIGN` | 1 | 0 = with `DSFLIP_LOWLAT`, DraStic isn't held (only the queue and the latch wait go) |
++| `DSFLIP_LOWLAT_ALIGN` | 0 | 1 = with `DSFLIP_LOWLAT`, DraStic is also held in its present to start its next frame as late as the panels allow. Off by default since 0.5.0: DraStic keeps only ~25 ms of sound ahead of the pump at its present, the sound's floor cut nearly every hold short and the frames then came after their deadline: 6-17 repeats and 26-28 drops a minute in Mario Kart DS on the RG DS, for ~5 ms less present -> screen |
+ | `DSFLIP_LATCH_MARGIN` | 1300 | The shortest time (µs) before a vblank that a frame is committed at (diagnostics) |
+ | `DSFLIP_RESUME_FILE`, `DSFLIP_RESUME_LOAD`, `DSFLIP_RESUME_ON_QUIT` | , 0, 1 | See *Quitting with a save* |
+ | `DSFLIP_STALL_QUIT` | 20 | Seconds without a frame from DraStic (outside its menu and the in-game menu) before the game is ended; 0 = never. After 5 s the log lists every thread's state and a card says so, and the exit hotkey quits at once |
+diff --git a/src/dsflip.c b/src/dsflip.c
+index 39f95e7..b7c88e5 100644
+--- a/src/dsflip.c
++++ b/src/dsflip.c
+@@ -321,14 +321,19 @@ static int pacing_latch = 1, tfd = -1;
+  *    deadline, latch_hi()); one that arrives after it waits for the next cycle's deadline, where a newer frame that
+  *    came meanwhile replaces it (committing it at once would make the next, on-time frame wait behind its flip, and
+  *    every frame after it: a refresh more latency for good);
+- *  - DSFLIP_LOWLAT_ALIGN (on): DraStic is held in its present until its next frame, started then, will just make the
++ *  - DSFLIP_LOWLAT_ALIGN=1 (off by default, see lowlat_align): DraStic is held in its present until its next frame, started then, will just make the
+  *    next deadline (the frame's measured time from that release, a decaying maximum, plus a pad that grows on a missed
+  *    vblank). DraStic reads its buttons when it starts a frame, so they're read as late as the panels allow. The hold
+  *    lets DraStic go early while its sound runs short (as the queue's hold: audio_floor_us) and never holds while it
+  *    isn't paced by its sound (fast-forward).
+  * Frames that come unevenly (2x) show as drops and repeats that the queue would have hidden: the price of no queue. */
+ static int pacing_lowlat;               /* DSFLIP_LOWLAT=1 */
+-static int lowlat_align = 1;            /* DSFLIP_LOWLAT_ALIGN=0: no hold (only the queue and the latch out) */
++/* DSFLIP_LOWLAT_ALIGN=1: the hold (below). Off by default since 0.5.0: DraStic keeps only ~25 ms of sound ahead of
++ * the pump at its present (15 at least), the hold wanted 13-19 ms on average, and the sound's floor (8-25 ms) cut
++ * nearly every hold short: the frame came after its deadline anyway and waited a refresh more, and the next hold
++ * aimed past that. Mario Kart DS on the RG DS: 6-17 repeats and 26-28 drops a minute with it, 2 and 4 without,
++ * for ~5 ms less present -> screen (26 vs 33 ms; off: 53) */
++static int lowlat_align = 0;
+ static volatile int lowlat_ff;          /* DraStic's fast-forward is on (its control toggled it: see lowlat_saw_event) */
+ static int ff_button = -1;              /* DraStic's FAST_FORWARD control, a joystick button (resume.c), -1 if none */
+ static long long ll_work;               /* DraStic's time from a release to its next present (us), decaying maximum */
+@@ -339,6 +344,7 @@ static unsigned long ll_fseq;           /* presents so far (dbuf.fseq: which pre
+ static long long fs_tp[64];             /* each present's time (us), by fseq % 64: present -> on screen, any mode */
+ static long long st_p2s_sum, st_p2s_max; static int st_p2s_n;
+ static int st_ll_ahead;                 /* holds that waited a refresh more for a frame still waiting ahead */
++static long long st_ll_snd_sum, st_ll_snd_min = 1LL << 40, st_ll_floor_sum, st_ll_want_sum; static int st_ll_snd_n, st_ll_want_n;   /* (the [lowlat] line: DraStic's sound at a hold, the floor, the hold wanted) */
+ static int st_ll_hold, st_ll_cut, st_ll_late, st_ll_skip; static long long st_ll_hold_us, st_ll_lead_sum; static int st_ll_lead_n;
+ static long long vbl_ref;               /* a recent top-panel vblank (flip timestamp, CLOCK_MONOTONIC us) */
+ static double period = 16666.7;         /* measured refresh period, us */
+@@ -978,6 +984,10 @@ static void *presenter(void *a) {
+                     st_ll_hold ? st_ll_hold_us / 1000.0 / st_ll_hold : 0.0, st_ll_ahead, st_ll_cut, st_ll_skip, ll_work / 1000.0,
+                     (ll_pad + (shader_on ? ll_shade : 0)) / 1000.0, lowlat_ff ? ", fast-forward on" : "");
+                 st_ll_hold = st_ll_cut = st_ll_late = st_ll_skip = st_ll_lead_n = st_ll_ahead = 0; st_ll_hold_us = st_ll_lead_sum = 0;
++                if (st_ll_snd_n) LOG("[lowlat] DraStic's sound ahead at its present: %.1f ms on average, %.1f at least; the floor %.1f ms; a hold wanted %.1f ms on average (%d)\n",
++                                     st_ll_snd_sum / 1000.0 / st_ll_snd_n, st_ll_snd_min / 1000.0, st_ll_floor_sum / 1000.0 / st_ll_snd_n,
++                                     st_ll_want_n ? st_ll_want_sum / 1000.0 / st_ll_want_n : 0.0, st_ll_want_n);
++                st_ll_snd_n = st_ll_want_n = 0; st_ll_snd_sum = st_ll_floor_sum = st_ll_want_sum = 0; st_ll_snd_min = 1LL << 40;
+                 if (!st_miss && ll_pad > 500) ll_pad = fmax(500, ll_pad - 250);   /* back after a clean 10 s */
+             }
+             if (st_p2s_n) LOG("[latency] DraStic's present -> on screen: %.1f ms on average, %.1f at most (%d frames)\n",
+@@ -1732,7 +1742,7 @@ __attribute__((constructor)) static void init(void) {
+              * of latency */
+             pacing_lowlat = 1; pacing_latch = 1; queue_depth = 1; queue_wait_us = 0;
+             { const char *lq = getenv("DSFLIP_LOWLAT_QUEUE"); if (lq && *lq) queue_depth = atoi(lq) < 0 ? 0 : atoi(lq) > 2 ? 2 : atoi(lq); }
+-            const char *al = getenv("DSFLIP_LOWLAT_ALIGN"); if (al && *al == '0') lowlat_align = 0;
++            const char *al = getenv("DSFLIP_LOWLAT_ALIGN"); if (al && *al) lowlat_align = *al == '1';
+             ff_button = resume_control_button("FAST_FORWARD");
+             /* the sound a little closer too: the pump's ring at 1024 frames (23 ms) instead of 1536, ALSA's buffer
+              * 20 ms instead of 30 (unless set). And DraStic keeps 60 ms of sound made ahead instead of its 35: the hold
+@@ -2230,10 +2240,12 @@ static void lowlat_hold(long long tp, unsigned long mine) {
+     unlock(&mu);
+     long long lead = audio_drastic_lead_us();
+     if (!learned || lowlat_ff || lead >= 120000) { if (learned) st_ll_skip++; return; }
++    st_ll_snd_n++; st_ll_snd_sum += lead; if (lead < st_ll_snd_min) st_ll_snd_min = lead; st_ll_floor_sum += audio_floor_us();
+     /* this frame's own deadline (the first at or after it came), then the next cycle's */
+     double own = (double)tp - ph + hi + (ph > hi ? per : 0) + ahead * per;
+     long long target = (long long)(own + per - pad) - work, now = now_us();
+     if (target <= now) { ll_release = now; return; }       /* no time to spare: on at once (and a sample) */
++    st_ll_want_sum += target - now; st_ll_want_n++;
+     long long left = lead - (long long)audio_floor_us();   /* until its sound would run short */
+     if (left <= 0) { st_ll_cut++; return; }                 /* (no sample: it may wait for its sound now) */
+     long long until = target, cut = 0;
+-- 
+2.56.0
+
+
+From 917638a11beb4bf05ba61ae3bff6ca199554681c Mon Sep 17 00:00:00 2001
+From: Anthony Giacalone <anthony.giacalone@csulb.edu>
+Date: Sun, 1 Nov 2026 11:54:19 -0800
+Subject: [PATCH 12/12] 0.5.0-beta.1-rocknixds.12: BananaOS line fixes for
+ ROCKNIXDS (phase 2)
+
+rocknixds.11 plus, from the BananaOS line (-x, conflicts resolved for
+our line): a quit while the in-game menu is open reaches DraStic; Quit
+without saving on the quit question (X); DSFLIP_RESUME_ON_QUIT=0;
+DSFLIP_LOG_TIME; low latency (DSFLIP_LOWLAT=1, experimental); the
+sleeping sound wait (DSFLIP_AUDIO_WAIT=1); the in-game menu clock
+(DSFLIP_CPUGOV_MENU=<kHz>); DSFLIP_CPUGOV_SUM. Opt-in on this line
+only: the quit's audio hand-off (DSFLIP_AUDIO_CLOSE_CHILD=1) and the
+cpugov spike rule (DSFLIP_CPUGOV_SPIKE=1). No default that changes
+frame pacing, sound or the clock on ROCKNIX.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LMsLD8jTdPsU6UcXHj7s2H
+---
+ VERSION | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/VERSION b/VERSION
+index 2c614ff..45c9cf9 100644
+--- a/VERSION
++++ b/VERSION
+@@ -1 +1 @@
+-0.5.0-beta.1-rocknixds.11
++0.5.0-beta.1-rocknixds.12
+-- 
+2.56.0
+
