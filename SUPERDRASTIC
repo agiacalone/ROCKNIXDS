@@ -34,4 +34,40 @@
 # SuperDrastic's refs/testers/sd-9-test.6.
 # Released unchanged in ROCKNIXDS 1.6.2 (2026-10-12): the same package test build 7 shipped, its name kept; the
 # source is tagged rocknixds-1.6.2 in SuperDrastic (783d86f).
-0.5.0-beta.1-rocknixds.9-test.6 378e54bf517a82417c9c019d8ded4992c815c18db72795f45508888e0c269e60
+# 0.5.0-beta.1-rocknixds.10 (ROCKNIXDS 1.6.4 for the RG DS Plus, a hotfix): .9-test.6 plus the audio crackle fix,
+# SuperDrastic branch plus-audio-hotfix (d8f4105 on 783d86f). DraStic's sound ran out in heavy games (Mario Kart DS
+# racing: 18-33 gaps a minute, filled with zeros by DraStic's callback) when the full frame queue held it 20 ms and when
+# the CPU governor tried 1104 MHz again; the hold now lets DraStic go while its sound still covers its next frame, and
+# a step down that runs the sound out or drops a frame is undone for the session. Built with build.sh on a Debian trixie arm64
+# sysroot (needs glibc 2.38, like .9-test.6) and package.sh.
+# 0.5.0-beta.1-rocknixds.11 (ROCKNIXDS 1.6.4.3-plus, the agiacalone fork, 2026-11-01): .10 (d8f4105) plus fixes
+# cherry-picked from the BananaOS line of SuperDrastic (git cherry-pick -x; the BananaOS line is upstream's
+# 68eae50, which split from ours at 930c4c5): DraStic's clock with a gap over a second taken out (the long white
+# screen after a sleep, BananaLinux #64), 21 more shaders (libretro, Anbernic, NNDDSS), ds-grid-2x 13% cheaper and
+# ds-grid even on the RG DS, an opt-in display-locked sound rate (DSFLIP_AUDIO_LOCK_PER), save/load state pop-ups,
+# a charger shown as charging (#35), and a TERM that stops DraStic without SuperDrastic too. One fork fix on top:
+# libretro's "#pragma parameter" lines are commented out before compiling, because ROCKNIX's Mali driver refuses
+# their quotes (7 of the 21 shaders failed without it). Source: dsflip/superdrastic-0.5.0-beta.1-rocknixds.11.patch
+# (git format-patch d8f4105..b9826c4, 11 commits). Built with build.sh and package.sh in a Debian trixie container:
+# clang/lld 22.1.8 (apt.llvm.org) with -fstack-protector-strong through a target config file, as Ubuntu's clang
+# does by default; a rebuild of .10 there matches the shipped .10 except the compiler's name strings. Checked on an
+# RG DS Plus: tools/smoke.sh (Mario Kart DS, HeartGold: 60.0 presents/s, 0 dropped, 0 underruns), all 29 shaders
+# through tools/shtest at 1x and 2x, and a 5 s SIGSTOP logged and taken out by the clock fix.
+# 0.5.0-beta.1-rocknixds.12 (ROCKNIXDS 1.6.4.4-plus, 2026-11-01): .11 plus phase 2 from the BananaOS line, by hand
+# where the lines differ (agiacalone/SuperDrastic branch rocknixds-12; source: dsflip/superdrastic-0.5.0-beta.1-
+# rocknixds.12.patch, git format-patch rocknixds-11..rocknixds-12). On by default: a quit (SIGTERM) while the in-game
+# menu is open closes it and reaches DraStic; Quit without saving (X on the quit question, or its touch button).
+# Off unless set, so ROCKNIX's pacing and sound stay as in .11: low latency (DSFLIP_LOWLAT=1, _QUEUE, _ALIGN), the
+# sleeping sound wait (DSFLIP_AUDIO_WAIT=1), the cpugov spike rule (DSFLIP_CPUGOV_SPIKE=1), a menu clock
+# (DSFLIP_CPUGOV_MENU=<kHz>), the audio hand-off at quit (DSFLIP_AUDIO_CLOSE_CHILD=1; on ROCKNIX "default" is
+# PipeWire), DSFLIP_RESUME_ON_QUIT=0 (resume state on SIGUSR1 only) and DSFLIP_LOG_TIME=1. Not taken: brightness on
+# the menu, the Hotkeys page and F+SELECT swap (they need BananaOS's backlight, lid and F-key code), the menu's
+# translations (lang.c), and two that our line already has (slot pictures by fopen, both-screen state pictures).
+# Checked on an RG DS Plus: tools/smoke.sh with defaults on HeartGold (0 dropped) and Mario Kart DS six runs
+# alternating with .11 (0/6/2 dropped per 30 s against .11's 2/8/0); DSFLIP_LOWLAT=1 20 dropped per 30 s (rougher on
+# the Plus, as BananaOS notes; off by default); DSFLIP_AUDIO_WAIT=1 2 dropped, 0 underruns; a SIGTERM with the menu
+# open logged "quit asked while open" and the menu was back in 1 s.
+# The RG DS line (ROCKNIXDS 1.6.3.2, a beta) moves from .9-test.6 to .12 in one step: the same package as the Plus's
+# 1.6.4.4-plus, byte for byte. libdsflip finds the panels' size itself, and .10 to .12 changed no ROCKNIXDS script.
+# Not yet checked on an RG DS: every test above ran on an RG DS Plus.
+0.5.0-beta.1-rocknixds.12 a2d253d095007780b12e4d260e6fa7b402b791be9a8540336b0f94f2d7ddcba2
