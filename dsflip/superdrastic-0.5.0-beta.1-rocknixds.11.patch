@@ -1,0 +1,3648 @@
+From 6b0994f44439eb581b3c7e241b2947f08413ee4d Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 22:49:53 +0200
+Subject: [PATCH 01/11] DraStic's clock: a gap of more than a second in
+ gettimeofday is taken out (the long white screen after a sleep, #64)
+
+DraStic's frame wait works out "last + 14 ms - now" in 32-bit microseconds. The game is stopped while the handheld
+sleeps but the wall clock runs on, so the first wait after a sleep of more than 36 minutes wrapped to a large
+positive delay and DraStic slept up to another 36 minutes (white panels, the game frozen, longer the longer it
+slept). On the RG DS a 1 h jump of the clock froze MKDS for over a minute before; now it runs on at once. The DS's
+clock reads time(), so the game's date and time are unchanged. DSFLIP_CLOCK_GAPS=1 keeps the raw clock.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 26ca9f55549ae7be2cee0819bd33bdddac43672e)
+---
+ src/dsflip.c | 28 ++++++++++++++++++++++++++++
+ 1 file changed, 28 insertions(+)
+
+diff --git a/src/dsflip.c b/src/dsflip.c
+index 81f5d19..56647bf 100644
+--- a/src/dsflip.c
++++ b/src/dsflip.c
+@@ -266,6 +266,34 @@ void dsflip_log(const char *fmt, ...) {
+     va_list ap; va_start(ap, fmt); vfprintf(lg, fmt, ap); va_end(ap);
+ }
+ 
++/* ---------- DraStic's clock ----------
++ * DraStic paces with gettimeofday, and its wait (0x8a010 in 2.5.2.x) works out "last + 14 ms - now" in 32-bit
++ * microseconds. While the handheld sleeps the game is stopped but the wall clock runs on, so the first wait after
++ * waking sees a jump of hours: past 2^31 us (36 min) the difference wraps to a large positive number and DraStic
++ * sleeps for up to another 36 minutes (white panels, a frozen game, longer the longer it slept; #64). A gap of more
++ * than a second between two calls (DraStic calls it every frame) is therefore taken out of the clock it sees: time
++ * asleep, SIGSTOP'd (dark on the charger), or a clock set while it ran. The DS's own clock reads time(), so the
++ * game's date and time stay right. DSFLIP_CLOCK_GAPS=1 keeps the raw clock. */
++int gettimeofday(struct timeval *restrict tv, void *restrict tz) {
++    REAL(int, gettimeofday, struct timeval *restrict, void *restrict);
++    static int raw = -1;
++    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
++    static long long last, cut;             /* the last raw time returned (us), and the gaps taken out so far */
++    int r = real(tv, tz);
++    if (r || !tv) return r;
++    if (raw < 0) { const char *e = getenv("DSFLIP_CLOCK_GAPS"); raw = e && *e == '1'; }
++    if (raw) return r;
++    long long t = tv->tv_sec * 1000000LL + tv->tv_usec, gap = 0;
++    pthread_mutex_lock(&mu);
++    if (last && (t - last > 1000000 || t < last)) { gap = t - last; cut += gap - 1000; }  /* as if 1 ms had passed */
++    last = t;
++    t -= cut;
++    pthread_mutex_unlock(&mu);
++    if (gap) dsflip_log("[clock] a %+.1f s gap in the wall clock taken out of DraStic's\n", gap / 1e6);
++    tv->tv_sec = t / 1000000; tv->tv_usec = t % 1000000;
++    return 0;
++}
++
+ /* ---------- presenter ---------- */
+ static int pending_mask;                /* bit i: a flip event is still due for panel i's CRTC */
+ 
+-- 
+2.56.0
+
+
+From fc842aa4bc36a605febd6733f7c26f838ae7611e Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 17:34:42 +0200
+Subject: [PATCH 02/11] Eleven more shaders, from libretro's glsl-shaders (for
+ SuperDrastic and BananaDS)
+
+lcd1x-nds, lcd1x, lcd3x, nds-color, zfast-lcd, retro-v2, bevel,
+sharp-bilinear, sharp-bilinear-scanlines, zfast-crt, fxaa: libretro's
+single-pass shaders converted to this project's interface by
+tools/shaders/conv.py (the fragment stage; libretro's names mapped onto
+u_texture, u_texture_size, u_output_size, v_texcoord; SWIZ on the
+result), each keeping its original notice (THIRD_PARTY.md).
+
+Chosen by fit and cost on the RG DS's GPU at 600 MHz (a 512x384 screen
+drawn to 640x480): 1.1-3.3 ms a screen. Left out: aann, crt-easymode,
+pixel-art-aa, pixellate (5.7-9.7 ms a screen), crt-pi, crt-lottes-fast,
+crt-aperture, scanline, grade (don't compile for GLSL ES 1.00), quilez
+(no licence notice).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SoPzircPRmhYJPUYUWuUMW
+(cherry picked from commit adbf916e74f6d0dcb36778e0bbb69cb3a2059059)
+---
+ THIRD_PARTY.md                        |  11 +
+ shaders/bevel.frag                    | 122 +++++++++++
+ shaders/fxaa.frag                     | 299 ++++++++++++++++++++++++++
+ shaders/lcd1x-nds.frag                | 139 ++++++++++++
+ shaders/lcd1x.frag                    | 103 +++++++++
+ shaders/lcd3x.frag                    |  91 ++++++++
+ shaders/nds-color.frag                | 114 ++++++++++
+ shaders/retro-v2.frag                 | 110 ++++++++++
+ shaders/sharp-bilinear-scanlines.frag | 118 ++++++++++
+ shaders/sharp-bilinear.frag           |  93 ++++++++
+ shaders/zfast-crt.frag                | 156 ++++++++++++++
+ shaders/zfast-lcd.frag                | 128 +++++++++++
+ tools/shaders/conv.py                 |  72 +++++++
+ 13 files changed, 1556 insertions(+)
+ create mode 100644 shaders/bevel.frag
+ create mode 100644 shaders/fxaa.frag
+ create mode 100644 shaders/lcd1x-nds.frag
+ create mode 100644 shaders/lcd1x.frag
+ create mode 100644 shaders/lcd3x.frag
+ create mode 100644 shaders/nds-color.frag
+ create mode 100644 shaders/retro-v2.frag
+ create mode 100644 shaders/sharp-bilinear-scanlines.frag
+ create mode 100644 shaders/sharp-bilinear.frag
+ create mode 100644 shaders/zfast-crt.frag
+ create mode 100644 shaders/zfast-lcd.frag
+ create mode 100644 tools/shaders/conv.py
+
+diff --git a/THIRD_PARTY.md b/THIRD_PARTY.md
+index 98339eb..bf95056 100644
+--- a/THIRD_PARTY.md
++++ b/THIRD_PARTY.md
+@@ -7,7 +7,18 @@ SuperDrastic's own code is MIT licensed (see `LICENSE`). These parts keep their
+ | [rcheevos](https://github.com/RetroAchievements/rcheevos) (RetroAchievements), v12.5.0 with rc_client_do_frame split in two (see its VERSION) | `src/third_party/rcheevos` | MIT (`src/third_party/rcheevos/LICENSE`) |
+ | [stb_image, stb_truetype, stb_vorbis](https://github.com/nothings/stb) | `src/third_party/stb` | public domain or MIT (the end of each file) |
+ | AMD FidelityFX Super Resolution 1.0 (EASU), in `ds-fsr` | `shaders/ds-fsr.frag` | MIT, Copyright (c) 2021 Advanced Micro Devices, Inc. (notice in the file) |
++| libretro glsl-shaders: lcd1x_nds (Gigaherz's lcd3x, public domain, with hunterk/Pokefan531's NDS colour, public domain; edited by jdgleaver), in `lcd1x-nds` | `shaders/lcd1x-nds.frag` | GPL-2.0-or-later (notice in the file) |
++| libretro glsl-shaders: lcd1x and lcd3x (Gigaherz, public domain) | `shaders/lcd1x.frag`, `shaders/lcd3x.frag` | as in each file |
++| libretro glsl-shaders: nds-color (hunterk, Pokefan531) | `shaders/nds-color.frag` | public domain (notice in the file) |
++| libretro glsl-shaders: zfast_lcd and zfast_crt (Greg Hogan, SoltanGris42) | `shaders/zfast-lcd.frag`, `shaders/zfast-crt.frag` | GPL-2.0-or-later (notice in the files) |
++| libretro glsl-shaders: retro-v2, bevel | `shaders/retro-v2.frag`, `shaders/bevel.frag` | GPL-2.0-or-later (notices in the files) |
++| libretro glsl-shaders: sharp-bilinear-simple, sharp-bilinear-scanlines (rsn8887, Themaister) | `shaders/sharp-bilinear.frag`, `shaders/sharp-bilinear-scanlines.frag` | as in each file |
++| libretro glsl-shaders: fxaa (Timothy Lottes' FXAA) | `shaders/fxaa.frag` | as in the file |
+ 
+ **DraStic** is not part of SuperDrastic and is not included: it is Exophase's closed-source emulator, which your
+ firmware provides. SuperDrastic doesn't modify it; it is a library loaded next to it. ROCKNIX's built-in DraStic
+ shaders are read from ROCKNIX's `libdrastouch.so` at run time when present, and are not copied here either.
++
++The libretro shaders above (github.com/libretro/glsl-shaders) are converted to this project's shader interface by
++`tools/shaders/conv.py` (their fragment stage, libretro's names mapped onto u_texture, u_texture_size, u_output_size
++and v_texcoord, parameters at their defaults); each file keeps the original's notice at its top.
+diff --git a/shaders/bevel.frag b/shaders/bevel.frag
+new file mode 100644
+index 0000000..6ed789c
+--- /dev/null
++++ b/shaders/bevel.frag
+@@ -0,0 +1,122 @@
++// bevel: libretro's handheld/shaders/bevel.glsl (github.com/libretro/glsl-shaders), as a BananaOS shader (SuperDrastic and BananaDS)
++// for a DS screen drawn to the panel. Converted by tools/shaders/conv.py (SuperDrastic) (SuperDrastic): its fragment stage, libretro's names
++// mapped onto u_texture, u_texture_size, u_output_size and v_texcoord; its parameters at their defaults.
++// The original's top (its notice and parameters):
++/*
++   Hyllian's Bevel Shader
++  
++   Copyright (C) 2011-2014 Hyllian/Jararaca - sergiogdb@gmail.com
++
++   This program is free software; you can redistribute it and/or
++   modify it under the terms of the GNU General Public License
++   as published by the Free Software Foundation; either version 2
++   of the License, or (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
++
++*/
++
++// Parameter lines go here:
++#pragma parameter BEVEL_LEVEL "Bevel Level" 0.2 0.0 0.5 0.01
++#pragma parameter InputGamma "Input Gamma" 2.4 0.1 5.0 0.1
++#pragma parameter OutputGamma "Output Gamma" 2.2 0.1 5.0 0.1
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define Texture u_texture
++#define TextureSize u_texture_size
++#define InputSize u_texture_size
++#define OrigInputSize u_texture_size
++#define OutputSize u_output_size
++#define FrameCount 0
++#define FrameDirection 1
++#define TEX0 vec4(v_texcoord, 0.0, 0.0)
++#define COL0 vec4(1.0)
++#define main dsf_main
++
++
++#if __VERSION__ >= 130
++#define COMPAT_VARYING in
++#define COMPAT_TEXTURE texture
++#else
++#define COMPAT_VARYING varying
++#define FragColor gl_FragColor
++#define COMPAT_TEXTURE texture2D
++#endif
++
++#ifdef GL_ES
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++#define COMPAT_PRECISION mediump
++#else
++#define COMPAT_PRECISION
++#endif
++
++
++// fragment compatibility #defines
++#define Source Texture
++#define vTexCoord TEX0.xy
++
++#define SourceSize vec4(TextureSize, 1.0 / TextureSize) //either TextureSize or InputSize
++#define outsize vec4(OutputSize, 1.0 / OutputSize)
++
++#ifdef PARAMETER_UNIFORM
++uniform COMPAT_PRECISION float BEVEL_LEVEL;
++uniform COMPAT_PRECISION float InputGamma;
++uniform COMPAT_PRECISION float OutputGamma;
++#else
++#define BEVEL_LEVEL 0.2
++#define InputGamma 2.4
++#define OutputGamma 2.2
++#endif
++
++#define GAMMA_IN(color)     pow(color, vec3(InputGamma, InputGamma, InputGamma))
++#define GAMMA_OUT(color)    pow(color, vec3(1.0 / OutputGamma, 1.0 / OutputGamma, 1.0 / OutputGamma))
++
++vec3 bevel(vec2 pos, vec3 color)
++{
++    vec3 weight;
++
++    float r = sqrt(dot(pos, vec2(1.0)));
++
++    vec3 delta = mix(vec3(BEVEL_LEVEL), vec3(1.0-BEVEL_LEVEL), color);
++
++    weight = delta*(1.-r);
++
++    return color+weight;
++}
++
++void main()
++{
++    vec2 position = fract(vTexCoord * SourceSize.xy);
++    if (any(notEqual(InputSize, OrigInputSize)))
++        position = fract(vTexCoord * TextureSize.xy / InputSize.xy * OrigInputSize.xy);
++
++    vec3 color = GAMMA_IN(COMPAT_TEXTURE(Source, vTexCoord).rgb);
++
++    color = clamp(bevel(position, color), 0.0, 1.0);
++
++   FragColor = vec4(GAMMA_OUT(color), 1.0);
++} 
++#undef main
++void main()
++{
++    dsf_main();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/fxaa.frag b/shaders/fxaa.frag
+new file mode 100644
+index 0000000..ba9e0e4
+--- /dev/null
++++ b/shaders/fxaa.frag
+@@ -0,0 +1,299 @@
++// fxaa: libretro's anti-aliasing/shaders/fxaa.glsl (github.com/libretro/glsl-shaders), as a BananaOS shader (SuperDrastic and BananaDS)
++// for a DS screen drawn to the panel. Converted by tools/shaders/conv.py (SuperDrastic) (SuperDrastic): its fragment stage, libretro's names
++// mapped onto u_texture, u_texture_size, u_output_size and v_texcoord; its parameters at their defaults.
++// The original's top (its notice and parameters):
++/**
++ * @license
++ * Copyright (c) 2011 NVIDIA Corporation. All rights reserved.
++ *
++ * TO  THE MAXIMUM  EXTENT PERMITTED  BY APPLICABLE  LAW, THIS SOFTWARE  IS PROVIDED
++ * *AS IS*  AND NVIDIA AND  ITS SUPPLIERS DISCLAIM  ALL WARRANTIES,  EITHER  EXPRESS
++ * OR IMPLIED, INCLUDING, BUT NOT LIMITED  TO, NONINFRINGEMENT,IMPLIED WARRANTIES OF
++ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.  IN NO EVENT SHALL  NVIDIA 
++ * OR ITS SUPPLIERS BE  LIABLE  FOR  ANY  DIRECT, SPECIAL,  INCIDENTAL,  INDIRECT,  OR  
++ * CONSEQUENTIAL DAMAGES WHATSOEVER (INCLUDING, WITHOUT LIMITATION,  DAMAGES FOR LOSS 
++ * OF BUSINESS PROFITS, BUSINESS INTERRUPTION, LOSS OF BUSINESS INFORMATION, OR ANY 
++ * OTHER PECUNIARY LOSS) ARISING OUT OF THE  USE OF OR INABILITY  TO USE THIS SOFTWARE, 
++ * EVEN IF NVIDIA HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH DAMAGES.
++ */
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define Texture u_texture
++#define TextureSize u_texture_size
++#define InputSize u_texture_size
++#define OrigInputSize u_texture_size
++#define OutputSize u_output_size
++#define FrameCount 0
++#define FrameDirection 1
++#define TEX0 vec4(v_texcoord, 0.0, 0.0)
++#define COL0 vec4(1.0)
++#define main dsf_main
++
++
++#if __VERSION__ >= 130
++#define COMPAT_VARYING in
++#define COMPAT_TEXTURE texture
++#else
++#define COMPAT_VARYING varying
++#define COMPAT_TEXTURE texture2D
++#define FragColor gl_FragColor
++#endif
++
++#ifdef GL_ES
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++#define COMPAT_PRECISION mediump
++#else
++#define COMPAT_PRECISION
++#endif
++
++
++// compatibility #defines
++#define Source Texture
++#define vTexCoord TEX0.xy
++#define SourceSize vec4(TextureSize, 1.0 / TextureSize) //either TextureSize or InputSize
++#define outsize vec4(OutputSize, 1.0 / OutputSize)
++
++
++
++/*
++FXAA_PRESET - Choose compile-in knob preset 0-5.
++------------------------------------------------------------------------------
++FXAA_EDGE_THRESHOLD - The minimum amount of local contrast required 
++                      to apply algorithm.
++                      1.0/3.0  - too little
++                      1.0/4.0  - good start
++                      1.0/8.0  - applies to more edges
++                      1.0/16.0 - overkill
++------------------------------------------------------------------------------
++FXAA_EDGE_THRESHOLD_MIN - Trims the algorithm from processing darks.
++                          Perf optimization.
++                          1.0/32.0 - visible limit (smaller isn't visible)
++                          1.0/16.0 - good compromise
++                          1.0/12.0 - upper limit (seeing artifacts)
++------------------------------------------------------------------------------
++FXAA_SEARCH_STEPS - Maximum number of search steps for end of span.
++------------------------------------------------------------------------------
++FXAA_SEARCH_THRESHOLD - Controls when to stop searching.
++                        1.0/4.0 - seems to be the best quality wise
++------------------------------------------------------------------------------
++FXAA_SUBPIX_TRIM - Controls sub-pixel aliasing removal.
++                   1.0/2.0 - low removal
++                   1.0/3.0 - medium removal
++                   1.0/4.0 - default removal
++                   1.0/8.0 - high removal
++                   0.0 - complete removal
++------------------------------------------------------------------------------
++FXAA_SUBPIX_CAP - Insures fine detail is not completely removed.
++                  This is important for the transition of sub-pixel detail,
++                  like fences and wires.
++                  3.0/4.0 - default (medium amount of filtering)
++                  7.0/8.0 - high amount of filtering
++                  1.0 - no capping of sub-pixel aliasing removal
++*/
++
++#ifndef FXAA_PRESET
++    #define FXAA_PRESET 5
++#endif
++#if (FXAA_PRESET == 3)
++    #define FXAA_EDGE_THRESHOLD      (1.0/8.0)
++    #define FXAA_EDGE_THRESHOLD_MIN  (1.0/16.0)
++    #define FXAA_SEARCH_STEPS        16
++    #define FXAA_SEARCH_THRESHOLD    (1.0/4.0)
++    #define FXAA_SUBPIX_CAP          (3.0/4.0)
++    #define FXAA_SUBPIX_TRIM         (1.0/4.0)
++#endif
++#if (FXAA_PRESET == 4)
++    #define FXAA_EDGE_THRESHOLD      (1.0/8.0)
++    #define FXAA_EDGE_THRESHOLD_MIN  (1.0/24.0)
++    #define FXAA_SEARCH_STEPS        24
++    #define FXAA_SEARCH_THRESHOLD    (1.0/4.0)
++    #define FXAA_SUBPIX_CAP          (3.0/4.0)
++    #define FXAA_SUBPIX_TRIM         (1.0/4.0)
++#endif
++#if (FXAA_PRESET == 5)
++    #define FXAA_EDGE_THRESHOLD      (1.0/8.0)
++    #define FXAA_EDGE_THRESHOLD_MIN  (1.0/24.0)
++    #define FXAA_SEARCH_STEPS        32
++    #define FXAA_SEARCH_THRESHOLD    (1.0/4.0)
++    #define FXAA_SUBPIX_CAP          (3.0/4.0)
++    #define FXAA_SUBPIX_TRIM         (1.0/4.0)
++#endif
++
++#define FXAA_SUBPIX_TRIM_SCALE (1.0/(1.0 - FXAA_SUBPIX_TRIM))
++
++// Return the luma, the estimation of luminance from rgb inputs.
++// This approximates luma using one FMA instruction,
++// skipping normalization and tossing out blue.
++// FxaaLuma() will range 0.0 to 2.963210702.
++COMPAT_PRECISION float FxaaLuma(vec3 rgb) {
++    return rgb.y * (0.587/0.299) + rgb.x;
++}
++
++vec3 FxaaLerp3(vec3 a, vec3 b, float amountOfA) {
++    return (vec3(-amountOfA) * b) + ((a * vec3(amountOfA)) + b);
++}
++
++vec4 FxaaTexOff(sampler2D tex, vec2 pos, ivec2 off, vec2 rcpFrame) {
++    float x = pos.x + float(off.x) * rcpFrame.x;
++    float y = pos.y + float(off.y) * rcpFrame.y;
++    return COMPAT_TEXTURE(tex, vec2(x, y));
++}
++
++// pos is the output of FxaaVertexShader interpolated across screen.
++// xy -> actual texture position {0.0 to 1.0}
++// rcpFrame should be a uniform equal to  {1.0/frameWidth, 1.0/frameHeight}
++vec3 FxaaPixelShader(vec2 pos, sampler2D tex, vec2 rcpFrame)
++{
++    vec3 rgbN = FxaaTexOff(tex, pos.xy, ivec2( 0,-1), rcpFrame).xyz;
++    vec3 rgbW = FxaaTexOff(tex, pos.xy, ivec2(-1, 0), rcpFrame).xyz;
++    vec3 rgbM = FxaaTexOff(tex, pos.xy, ivec2( 0, 0), rcpFrame).xyz;
++    vec3 rgbE = FxaaTexOff(tex, pos.xy, ivec2( 1, 0), rcpFrame).xyz;
++    vec3 rgbS = FxaaTexOff(tex, pos.xy, ivec2( 0, 1), rcpFrame).xyz;
++    
++    float lumaN = FxaaLuma(rgbN);
++    float lumaW = FxaaLuma(rgbW);
++    float lumaM = FxaaLuma(rgbM);
++    float lumaE = FxaaLuma(rgbE);
++    float lumaS = FxaaLuma(rgbS);
++    float rangeMin = min(lumaM, min(min(lumaN, lumaW), min(lumaS, lumaE)));
++    float rangeMax = max(lumaM, max(max(lumaN, lumaW), max(lumaS, lumaE)));
++    
++    float range = rangeMax - rangeMin;
++    if(range < max(FXAA_EDGE_THRESHOLD_MIN, rangeMax * FXAA_EDGE_THRESHOLD))
++    {
++        return rgbM;
++    }
++    
++    vec3 rgbL = rgbN + rgbW + rgbM + rgbE + rgbS;
++    
++    float lumaL = (lumaN + lumaW + lumaE + lumaS) * 0.25;
++    float rangeL = abs(lumaL - lumaM);
++    float blendL = max(0.0, (rangeL / range) - FXAA_SUBPIX_TRIM) * FXAA_SUBPIX_TRIM_SCALE; 
++    blendL = min(FXAA_SUBPIX_CAP, blendL);
++    
++    vec3 rgbNW = FxaaTexOff(tex, pos.xy, ivec2(-1,-1), rcpFrame).xyz;
++    vec3 rgbNE = FxaaTexOff(tex, pos.xy, ivec2( 1,-1), rcpFrame).xyz;
++    vec3 rgbSW = FxaaTexOff(tex, pos.xy, ivec2(-1, 1), rcpFrame).xyz;
++    vec3 rgbSE = FxaaTexOff(tex, pos.xy, ivec2( 1, 1), rcpFrame).xyz;
++    rgbL += (rgbNW + rgbNE + rgbSW + rgbSE);
++    rgbL *= vec3(1.0/9.0);
++    
++    float lumaNW = FxaaLuma(rgbNW);
++    float lumaNE = FxaaLuma(rgbNE);
++    float lumaSW = FxaaLuma(rgbSW);
++    float lumaSE = FxaaLuma(rgbSE);
++    
++    float edgeVert = 
++        abs((0.25 * lumaNW) + (-0.5 * lumaN) + (0.25 * lumaNE)) +
++        abs((0.50 * lumaW ) + (-1.0 * lumaM) + (0.50 * lumaE )) +
++        abs((0.25 * lumaSW) + (-0.5 * lumaS) + (0.25 * lumaSE));
++    float edgeHorz = 
++        abs((0.25 * lumaNW) + (-0.5 * lumaW) + (0.25 * lumaSW)) +
++        abs((0.50 * lumaN ) + (-1.0 * lumaM) + (0.50 * lumaS )) +
++        abs((0.25 * lumaNE) + (-0.5 * lumaE) + (0.25 * lumaSE));
++        
++    bool horzSpan = edgeHorz >= edgeVert;
++    float lengthSign = horzSpan ? -rcpFrame.y : -rcpFrame.x;
++    
++    if(!horzSpan)
++    {
++        lumaN = lumaW;
++        lumaS = lumaE;
++    }
++    
++    float gradientN = abs(lumaN - lumaM);
++    float gradientS = abs(lumaS - lumaM);
++    lumaN = (lumaN + lumaM) * 0.5;
++    lumaS = (lumaS + lumaM) * 0.5;
++    
++    if (gradientN < gradientS)
++    {
++        lumaN = lumaS;
++        lumaN = lumaS;
++        gradientN = gradientS;
++        lengthSign *= -1.0;
++    }
++    
++    vec2 posN;
++    posN.x = pos.x + (horzSpan ? 0.0 : lengthSign * 0.5);
++    posN.y = pos.y + (horzSpan ? lengthSign * 0.5 : 0.0);
++    
++    gradientN *= FXAA_SEARCH_THRESHOLD;
++    
++    vec2 posP = posN;
++    vec2 offNP = horzSpan ? vec2(rcpFrame.x, 0.0) : vec2(0.0, rcpFrame.y); 
++    float lumaEndN = lumaN;
++    float lumaEndP = lumaN;
++    bool doneN = false;
++    bool doneP = false;
++    posN += offNP * vec2(-1.0, -1.0);
++    posP += offNP * vec2( 1.0,  1.0);
++    
++    for(int i = 0; i < FXAA_SEARCH_STEPS; i++) {
++        if(!doneN)
++        {
++            lumaEndN = FxaaLuma(COMPAT_TEXTURE(tex, posN.xy).xyz);
++        }
++        if(!doneP)
++        {
++            lumaEndP = FxaaLuma(COMPAT_TEXTURE(tex, posP.xy).xyz);
++        }
++        
++        doneN = doneN || (abs(lumaEndN - lumaN) >= gradientN);
++        doneP = doneP || (abs(lumaEndP - lumaN) >= gradientN);
++        
++        if(doneN && doneP)
++        {
++            break;
++        }
++        if(!doneN)
++        {
++            posN -= offNP;
++        }
++        if(!doneP)
++        {
++            posP += offNP;
++        }
++    }
++    
++    float dstN = horzSpan ? pos.x - posN.x : pos.y - posN.y;
++    float dstP = horzSpan ? posP.x - pos.x : posP.y - pos.y;
++    bool directionN = dstN < dstP;
++    lumaEndN = directionN ? lumaEndN : lumaEndP;
++    
++    if(((lumaM - lumaN) < 0.0) == ((lumaEndN - lumaN) < 0.0))
++    {
++        lengthSign = 0.0;
++    }
++ 
++
++    float spanLength = (dstP + dstN);
++    dstN = directionN ? dstN : dstP;
++    float subPixelOffset = (0.5 + (dstN * (-1.0/spanLength))) * lengthSign;
++    vec3 rgbF = COMPAT_TEXTURE(tex, vec2(
++        pos.x + (horzSpan ? 0.0 : subPixelOffset),
++        pos.y + (horzSpan ? subPixelOffset : 0.0))).xyz;
++    return FxaaLerp3(rgbL, rgbF, blendL); 
++}
++
++void main()
++{
++   FragColor = vec4(FxaaPixelShader(vTexCoord, Source, vec2(SourceSize.z, SourceSize.w)), 1.0) * 1.0;
++} 
++#undef main
++void main()
++{
++    dsf_main();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/lcd1x-nds.frag b/shaders/lcd1x-nds.frag
+new file mode 100644
+index 0000000..fad13c3
+--- /dev/null
++++ b/shaders/lcd1x-nds.frag
+@@ -0,0 +1,139 @@
++// lcd1x-nds: libretro's handheld/shaders/lcd1x_nds.glsl (github.com/libretro/glsl-shaders), as a BananaOS shader (SuperDrastic and BananaDS)
++// for a DS screen drawn to the panel. Converted by tools/shaders/conv.py (SuperDrastic) (SuperDrastic): its fragment stage, libretro's names
++// mapped onto u_texture, u_texture_size, u_output_size and v_texcoord; its parameters at their defaults.
++// The original's top (its notice and parameters):
++/*
++   lcd1x_nds shader
++
++   A slightly tweaked version of lcd3x:
++
++   - Original lcd3x code written by Gigaherz and released into the public domain
++
++   - Original 'nds_color' code written by hunterk, modified by Pokefan531 and
++     released into the public domain
++
++   Notes:
++
++   > Omits LCD 'colour seperation' effect
++
++   > Has 'properly' aligned scanlines
++
++   > Includes NDS colour correction
++
++   > Supports any NDS internal resolution setting
++
++   Edited by jdgleaver
++
++   This program is free software; you can redistribute it and/or modify it
++   under the terms of the GNU General Public License as published by the Free
++   Software Foundation; either version 2 of the License, or (at your option)
++   any later version.
++*/
++
++#pragma parameter BRIGHTEN_SCANLINES "Brighten Scanlines" 16.0 1.0 32.0 0.5
++#pragma parameter BRIGHTEN_LCD "Brighten LCD" 4.0 1.0 12.0 0.1
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define Texture u_texture
++#define TextureSize u_texture_size
++#define InputSize u_texture_size
++#define OrigInputSize u_texture_size
++#define OutputSize u_output_size
++#define FrameCount 0
++#define FrameDirection 1
++#define TEX0 vec4(v_texcoord, 0.0, 0.0)
++#define InvInputHeight (1.0 / u_texture_size.y)
++#define main dsf_main
++
++
++#if __VERSION__ >= 130
++#define COMPAT_VARYING in
++#define COMPAT_TEXTURE texture
++#else
++#define COMPAT_VARYING varying
++#define FragColor gl_FragColor
++#define COMPAT_TEXTURE texture2D
++#endif
++
++#ifdef GL_ES
++precision highp float;
++precision highp int;
++#define COMPAT_PRECISION highp
++#else
++#define COMPAT_PRECISION
++#endif
++
++
++#ifdef PARAMETER_UNIFORM
++// All parameter floats need to have COMPAT_PRECISION in front of them
++uniform COMPAT_PRECISION float BRIGHTEN_SCANLINES;
++uniform COMPAT_PRECISION float BRIGHTEN_LCD;
++#else
++#define BRIGHTEN_SCANLINES 16.0
++#define BRIGHTEN_LCD 4.0
++#endif
++
++// Magic Numbers
++#define PI 3.141592654
++
++#define NDS_SCREEN_HEIGHT 192.0
++
++#define TARGET_GAMMA 1.91
++const float INV_DISPLAY_GAMMA = 1.0 / 1.91;
++#define CC_LUM 0.89
++#define CC_R 0.87
++#define CC_G 0.645
++#define CC_B 0.73
++#define CC_RG 0.10
++#define CC_RB 0.10
++#define CC_GR 0.255
++#define CC_GB 0.17
++#define CC_BR -0.125
++#define CC_BG 0.255
++
++/*
++   FRAGMENT SHADER
++*/
++void main()
++{
++   // Generate LCD grid effect
++   // > Note the 0.25 pixel offset -> required to ensure that
++   //   scanlines occur *between* pixels
++   // > Divide pixel coordinate by current scale factor
++   //   (input_video_height / nds_screen_height)
++   COMPAT_PRECISION vec2 angle = 2.0 * PI *
++                              (((TEX0.xy * OrigInputSize * TextureSize / InputSize) *
++                                NDS_SCREEN_HEIGHT * InvInputHeight) -
++                               0.25);
++
++   COMPAT_PRECISION float yfactor = (BRIGHTEN_SCANLINES + sin(angle.y)) / (BRIGHTEN_SCANLINES + 1.0);
++   COMPAT_PRECISION float xfactor = (BRIGHTEN_LCD + sin(angle.x)) / (BRIGHTEN_LCD + 1.0);
++
++   // Get colour sample
++   COMPAT_PRECISION vec3 colour = COMPAT_TEXTURE(Texture, TEX0.xy).rgb;
++
++   // Apply colour correction
++   colour.rgb = pow(colour.rgb, vec3(TARGET_GAMMA));
++   colour.rgb = mat3(CC_R,  CC_RG, CC_RB,
++                     CC_GR, CC_G,  CC_GB,
++                     CC_BR, CC_BG, CC_B) * (colour.rgb * CC_LUM);
++   colour.rgb = clamp(pow(colour.rgb, vec3(INV_DISPLAY_GAMMA)), 0.0, 1.0);
++
++   // Apply LCD grid effect
++   colour.rgb = yfactor * xfactor * colour.rgb;
++
++   FragColor = vec4(colour.rgb, 1.0);
++} 
++#undef main
++void main()
++{
++    dsf_main();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/lcd1x.frag b/shaders/lcd1x.frag
+new file mode 100644
+index 0000000..d8dcafa
+--- /dev/null
++++ b/shaders/lcd1x.frag
+@@ -0,0 +1,103 @@
++// lcd1x: libretro's handheld/shaders/lcd1x.glsl (github.com/libretro/glsl-shaders), as a BananaOS shader (SuperDrastic and BananaDS)
++// for a DS screen drawn to the panel. Converted by tools/shaders/conv.py (SuperDrastic) (SuperDrastic): its fragment stage, libretro's names
++// mapped onto u_texture, u_texture_size, u_output_size and v_texcoord; its parameters at their defaults.
++// The original's top (its notice and parameters):
++/*
++   lcd1x shader
++
++   A slightly tweaked version of lcd3x, original code written by Gigaherz
++   and released into the public domain:
++
++   > Omits LCD 'colour seperation' effect
++
++   > Has 'properly' aligned scanlines
++
++   Edited by jdgleaver
++
++   This program is free software; you can redistribute it and/or modify it
++   under the terms of the GNU General Public License as published by the Free
++   Software Foundation; either version 2 of the License, or (at your option)
++   any later version.
++*/
++
++#pragma parameter BRIGHTEN_SCANLINES "Brighten Scanlines" 16.0 1.0 32.0 0.5
++#pragma parameter BRIGHTEN_LCD "Brighten LCD" 4.0 1.0 12.0 0.1
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define Texture u_texture
++#define TextureSize u_texture_size
++#define InputSize u_texture_size
++#define OrigInputSize u_texture_size
++#define OutputSize u_output_size
++#define FrameCount 0
++#define FrameDirection 1
++#define TEX0 vec4(v_texcoord, 0.0, 0.0)
++
++#define main dsf_main
++
++
++#if __VERSION__ >= 130
++#define COMPAT_VARYING in
++#define COMPAT_TEXTURE texture
++#else
++#define COMPAT_VARYING varying
++#define FragColor gl_FragColor
++#define COMPAT_TEXTURE texture2D
++#endif
++
++#ifdef GL_ES
++precision highp float;
++precision highp int;
++#define COMPAT_PRECISION highp
++#else
++#define COMPAT_PRECISION
++#endif
++
++
++#ifdef PARAMETER_UNIFORM
++// All parameter floats need to have COMPAT_PRECISION in front of them
++uniform COMPAT_PRECISION float BRIGHTEN_SCANLINES;
++uniform COMPAT_PRECISION float BRIGHTEN_LCD;
++#else
++#define BRIGHTEN_SCANLINES 16.0
++#define BRIGHTEN_LCD 4.0
++#endif
++
++// Magic Numbers
++#define PI 3.141592654
++
++/*
++   FRAGMENT SHADER
++*/
++void main()
++{
++   // Generate LCD grid effect
++   // > Note the 0.25 pixel offset -> required to ensure that
++   //   scanlines occur *between* pixels
++   COMPAT_PRECISION vec2 angle =
++      2.0 * PI * ((TEX0.xy * OrigInputSize * TextureSize / InputSize) - 0.25);
++
++   COMPAT_PRECISION float yfactor = (BRIGHTEN_SCANLINES + sin(angle.y)) / (BRIGHTEN_SCANLINES + 1.0);
++   COMPAT_PRECISION float xfactor = (BRIGHTEN_LCD + sin(angle.x)) / (BRIGHTEN_LCD + 1.0);
++
++   // Get colour sample
++   COMPAT_PRECISION vec3 colour = COMPAT_TEXTURE(Texture, TEX0.xy).rgb;
++
++   // Apply LCD grid effect
++   colour.rgb = yfactor * xfactor * colour.rgb;
++
++   FragColor = vec4(colour.rgb, 1.0);
++} 
++#undef main
++void main()
++{
++    dsf_main();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/lcd3x.frag b/shaders/lcd3x.frag
+new file mode 100644
+index 0000000..0914b9b
+--- /dev/null
++++ b/shaders/lcd3x.frag
+@@ -0,0 +1,91 @@
++// lcd3x: libretro's handheld/shaders/lcd3x.glsl (github.com/libretro/glsl-shaders), as a BananaOS shader (SuperDrastic and BananaDS)
++// for a DS screen drawn to the panel. Converted by tools/shaders/conv.py (SuperDrastic) (SuperDrastic): its fragment stage, libretro's names
++// mapped onto u_texture, u_texture_size, u_output_size and v_texcoord; its parameters at their defaults.
++// The original's top (its notice and parameters):
++/*
++   Author: Gigaherz
++   License: Public domain
++*/
++
++// Parameter lines go here:
++#pragma parameter brighten_scanlines "Brighten Scanlines" 16.0 1.0 32.0 0.5
++#pragma parameter brighten_lcd "Brighten LCD" 4.0 1.0 12.0 0.1
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define Texture u_texture
++#define TextureSize u_texture_size
++#define InputSize u_texture_size
++#define OrigInputSize u_texture_size
++#define OutputSize u_output_size
++#define FrameCount 0
++#define FrameDirection 1
++#define TEX0 vec4(v_texcoord, 0.0, 0.0)
++#define COL0 vec4(1.0)
++#define main dsf_main
++
++
++#if __VERSION__ >= 130
++#define COMPAT_VARYING in
++#define COMPAT_TEXTURE texture
++#else
++#define COMPAT_VARYING varying
++#define FragColor gl_FragColor
++#define COMPAT_TEXTURE texture2D
++#endif
++
++#ifdef GL_ES
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++#define COMPAT_PRECISION mediump
++#else
++#define COMPAT_PRECISION
++#endif
++
++
++// compatibility #defines
++#define Source Texture
++#define vTexCoord TEX0.xy
++
++#define outsize vec4(OutputSize, 1.0 / OutputSize)
++
++#ifdef PARAMETER_UNIFORM
++// All parameter floats need to have COMPAT_PRECISION in front of them
++uniform COMPAT_PRECISION float brighten_scanlines;
++uniform COMPAT_PRECISION float brighten_lcd;
++#else
++#define brighten_scanlines 16.0
++#define brighten_lcd 4.0
++#endif
++
++const vec3 offsets = vec3(3.141592654) * vec3(1.0/2.0,1.0/2.0 - 2.0/3.0,1.0/2.0-4.0/3.0);
++
++void main()
++{
++    vec2 omega = vec2(3.141592654) * vec2(2.0) * OrigInputSize;
++    vec3 res = COMPAT_TEXTURE(Source, vTexCoord).xyz;
++
++    vec2 angle = vTexCoord * TextureSize / InputSize * omega;
++	
++    float yfactor = (brighten_scanlines + sin(angle.y)) / (brighten_scanlines + 1.0);
++    vec3 xfactors = (brighten_lcd + sin(angle.x + offsets)) / (brighten_lcd + 1.0);
++   
++    vec3 color = yfactor * xfactors * res;
++   
++   FragColor = vec4(color.x, color.y, color.z, 1.0);
++} 
++#undef main
++void main()
++{
++    dsf_main();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/nds-color.frag b/shaders/nds-color.frag
+new file mode 100644
+index 0000000..f1ebf17
+--- /dev/null
++++ b/shaders/nds-color.frag
+@@ -0,0 +1,114 @@
++// nds-color: libretro's handheld/shaders/color/nds-color.glsl (github.com/libretro/glsl-shaders), as a BananaOS shader (SuperDrastic and BananaDS)
++// for a DS screen drawn to the panel. Converted by tools/shaders/conv.py (SuperDrastic) (SuperDrastic): its fragment stage, libretro's names
++// mapped onto u_texture, u_texture_size, u_output_size and v_texcoord; its parameters at their defaults.
++// The original's top (its notice and parameters):
++/*
++   Shader Modified: Pokefan531
++   Color Mangler
++   Author: hunterk
++   License: Public domain
++*/
++// Shader that replicates the LCD dynamics from a Nintendo DS Phat
++
++// Compatibility #ifdefs needed for parameters
++#ifdef GL_ES
++#define COMPAT_PRECISION mediump
++#else
++#define COMPAT_PRECISION
++#endif
++
++#define target_gamma 1.91
++#define display_gamma 1.91
++#define sat 1.0
++#define lum 0.89
++#define contrast 1.0
++#define blr 0.0
++#define blg 0.0
++#define blb 0.0
++#define r 0.87
++#define g 0.645
++#define b 0.73
++#define rg 0.10
++#define rb 0.10
++#define gr 0.255
++#define gb 0.17
++#define br -0.125
++#define bg 0.255
++#define overscan_percent_x 0.0
++#define overscan_percent_y 0.0
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define Texture u_texture
++#define TextureSize u_texture_size
++#define InputSize u_texture_size
++#define OrigInputSize u_texture_size
++#define OutputSize u_output_size
++#define FrameCount 0
++#define FrameDirection 1
++#define TEX0 vec4(v_texcoord, 0.0, 0.0)
++#define COL0 vec4(1.0)
++#define main dsf_main
++
++
++#if __VERSION__ >= 130
++#define COMPAT_VARYING in
++#define COMPAT_TEXTURE texture
++#else
++#define COMPAT_VARYING varying
++#define FragColor gl_FragColor
++#define COMPAT_TEXTURE texture2D
++#endif
++
++#ifdef GL_ES
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++#define COMPAT_PRECISION mediump
++#else
++#define COMPAT_PRECISION
++#endif
++
++
++// compatibility #defines
++#define Source Texture
++#define vTexCoord TEX0.xy
++#define texture(c, d) COMPAT_TEXTURE(c, d)
++#define SourceSize vec4(TextureSize, 1.0 / TextureSize) //either TextureSize or InputSize
++#define outsize vec4(OutputSize, 1.0 / OutputSize)
++
++void main()
++{
++   vec4 screen = pow(texture(Source, vTexCoord), vec4(target_gamma)).rgba;
++   vec4 avglum = vec4(0.5);
++   screen = mix(screen, avglum, (1.0 - contrast));
++   
++ //				r   g    b   black
++mat4 color = mat4(r,  rg,  rb, 0.0,  //red channel
++			   gr,  g,   gb, 0.0,  //green channel
++			   br,  bg,  b,  0.0,  //blue channel
++			  blr, blg, blb,    0.0); //alpha channel; these numbers do nothing for our purposes.
++			  
++mat4 adjust = mat4((1.0 - sat) * 0.3086 + sat, (1.0 - sat) * 0.3086, (1.0 - sat) * 0.3086, 1.0,
++(1.0 - sat) * 0.6094, (1.0 - sat) * 0.6094 + sat, (1.0 - sat) * 0.6094, 1.0,
++(1.0 - sat) * 0.0820, (1.0 - sat) * 0.0820, (1.0 - sat) * 0.0820 + sat, 1.0,
++0.0, 0.0, 0.0, 1.0);
++	color *= adjust;
++	screen = clamp(screen * lum, 0.0, 1.0);
++	screen = color * screen;
++	FragColor = pow(screen, vec4(1.0 / display_gamma));
++} 
++#undef main
++void main()
++{
++    dsf_main();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/retro-v2.frag b/shaders/retro-v2.frag
+new file mode 100644
+index 0000000..7ee0737
+--- /dev/null
++++ b/shaders/retro-v2.frag
+@@ -0,0 +1,110 @@
++// retro-v2: libretro's handheld/shaders/retro-v2.glsl (github.com/libretro/glsl-shaders), as a BananaOS shader (SuperDrastic and BananaDS)
++// for a DS screen drawn to the panel. Converted by tools/shaders/conv.py (SuperDrastic) (SuperDrastic): its fragment stage, libretro's names
++// mapped onto u_texture, u_texture_size, u_output_size and v_texcoord; its parameters at their defaults.
++// The original's top (its notice and parameters):
++/*
++   Hyllian - Retro Shader - 2013
++
++   A re-implementation from the original made by Hyllian and DOLLS!
++   
++   This program is free software; you can redistribute it and/or
++   modify it under the terms of the GNU General Public License
++   as published by the Free Software Foundation; either version 2
++   of the License, or (at your option) any later version.
++
++   This program is distributed in the hope that it will be useful,
++   but WITHOUT ANY WARRANTY; without even the implied warranty of
++   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++   GNU General Public License for more details.
++
++   You should have received a copy of the GNU General Public License
++   along with this program; if not, write to the Free Software
++   Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
++*/
++
++// Parameter lines go here:
++#pragma parameter RETRO_PIXEL_SIZE "Retro Pixel Size" 0.84 0.0 1.0 0.01
++// ^^This value must be between 0.0 (totally black) and 1.0 (nearest neighbor)
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define Texture u_texture
++#define TextureSize u_texture_size
++#define InputSize u_texture_size
++#define OrigInputSize u_texture_size
++#define OutputSize u_output_size
++#define FrameCount 0
++#define FrameDirection 1
++#define TEX0 vec4(v_texcoord, 0.0, 0.0)
++#define COL0 vec4(1.0)
++#define main dsf_main
++
++
++#if __VERSION__ >= 130
++#define COMPAT_VARYING in
++#define COMPAT_TEXTURE texture
++#else
++#define COMPAT_VARYING varying
++#define FragColor gl_FragColor
++#define COMPAT_TEXTURE texture2D
++#endif
++
++#ifdef GL_ES
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++#define COMPAT_PRECISION mediump
++#else
++#define COMPAT_PRECISION
++#endif
++
++
++// fragment compatibility #defines
++#define Source Texture
++#define vTexCoord TEX0.xy
++
++#define SourceSize vec4(TextureSize, 1.0 / TextureSize) //either TextureSize or InputSize
++#define outsize vec4(OutputSize, 1.0 / OutputSize)
++
++#ifdef PARAMETER_UNIFORM
++uniform COMPAT_PRECISION float RETRO_PIXEL_SIZE;
++#else
++#define RETRO_PIXEL_SIZE 0.84
++#endif
++
++void main()
++{
++    // Reading the texel
++    vec3 E = pow(COMPAT_TEXTURE(Source, vTexCoord).xyz, vec3(2.4));
++
++    vec2 fp = fract(vTexCoord * SourceSize.xy);
++    vec2 ps = InputSize.xy * outsize.zw;
++    if (any(notEqual(InputSize, OrigInputSize)))
++    {
++        fp = fract(vTexCoord * TextureSize.xy / InputSize.xy * OrigInputSize.xy);
++        ps = OrigInputSize.xy * outsize.zw;
++    }
++
++    vec2 f = clamp(clamp(fp + 0.5*ps, 0.0, 1.0) - RETRO_PIXEL_SIZE, vec2(0.0), ps)/ps;
++
++    float max_coord =  max(f.x, f.y);
++
++    vec3 res = mix(E*(1.04+fp.x*fp.y), E*0.36, max_coord);
++
++    // Product interpolation
++    FragColor = vec4(clamp( pow(res, vec3(1.0 / 2.2)), 0.0, 1.0 ), 1.0);
++} 
++#undef main
++void main()
++{
++    dsf_main();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/sharp-bilinear-scanlines.frag b/shaders/sharp-bilinear-scanlines.frag
+new file mode 100644
+index 0000000..2e90477
+--- /dev/null
++++ b/shaders/sharp-bilinear-scanlines.frag
+@@ -0,0 +1,118 @@
++// sharp-bilinear-scanlines: libretro's interpolation/shaders/sharp-bilinear-scanlines.glsl (github.com/libretro/glsl-shaders), as a BananaOS shader (SuperDrastic and BananaDS)
++// for a DS screen drawn to the panel. Converted by tools/shaders/conv.py (SuperDrastic) (SuperDrastic): its fragment stage, libretro's names
++// mapped onto u_texture, u_texture_size, u_output_size and v_texcoord; its parameters at their defaults.
++// The original's top (its notice and parameters):
++/*
++   Author: rsn8887 (based on TheMaister)
++   License: Public domain
++
++   This is an integer prescale filter that should be combined
++   with a bilinear hardware filtering (GL_BILINEAR filter or some such) to achieve
++   a smooth scaling result with minimum blur. This is good for pixelgraphics
++   that are scaled by non-integer factors.
++   
++   The prescale factor and texel coordinates are precalculated
++   in the vertex shader for speed.
++*/
++
++// Parameter lines go here:
++#pragma parameter SCANLINE_BASE_BRIGHTNESS "Scanline Base Brightness" 0.60 0.0 1.0 0.01
++#pragma parameter SCANLINE_HORIZONTAL_MODULATION "Scanline Horizontal Modulation" 0.0 0.0 2.00 0.01
++#pragma parameter SCANLINE_VERTICAL_MODULATION "Scanline Vertical Modulation" 0.75 0.0 2.0 0.01
++
++#define pi 3.141592654
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define Texture u_texture
++#define TextureSize u_texture_size
++#define InputSize u_texture_size
++#define OrigInputSize u_texture_size
++#define OutputSize u_output_size
++#define FrameCount 0
++#define FrameDirection 1
++#define TEX0 vec4(v_texcoord, 0.0, 0.0)
++#define COL0 vec4(1.0)
++#define omega (vec2(3.141592654 * u_output_size.x, 2.0 * 3.141592654 * u_texture_size.y))
++#define precalc_texel (v_texcoord * u_texture_size)
++#define precalc_scale (max(floor(u_output_size / u_texture_size), vec2(1.0, 1.0)))
++#define main dsf_main
++
++
++#if __VERSION__ >= 130
++#define COMPAT_VARYING in
++#define COMPAT_TEXTURE texture
++#else
++#define COMPAT_VARYING varying
++#define FragColor gl_FragColor
++#define COMPAT_TEXTURE texture2D
++#endif
++
++#ifdef GL_ES
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++#define COMPAT_PRECISION mediump
++#else
++#define COMPAT_PRECISION
++#endif
++
++
++// fragment compatibility #defines
++#define Source Texture
++#define vTexCoord TEX0.xy
++
++#define SourceSize vec4(TextureSize, 1.0 / TextureSize) //either TextureSize or InputSize
++#define outsize vec4(OutputSize, 1.0 / OutputSize)
++
++#ifdef PARAMETER_UNIFORM
++// All parameter floats need to have COMPAT_PRECISION in front of them
++uniform COMPAT_PRECISION float SCANLINE_BASE_BRIGHTNESS;
++uniform COMPAT_PRECISION float SCANLINE_HORIZONTAL_MODULATION;
++uniform COMPAT_PRECISION float SCANLINE_VERTICAL_MODULATION;
++#else
++#define SCANLINE_BASE_BRIGHTNESS 0.60
++#define SCANLINE_HORIZONTAL_MODULATION 0.0
++#define SCANLINE_VERTICAL_MODULATION 0.75
++#endif
++
++
++void main()
++{
++   vec2 texel = precalc_texel;
++   vec2 scale = precalc_scale;
++
++   vec2 texel_floored = floor(texel);
++   vec2 s = fract(texel);
++   vec2 region_range = 0.5 - 0.5 / scale;
++
++   // Figure out where in the texel to sample to get correct pre-scaled bilinear.
++   // Uses the hardware bilinear interpolator to avoid having to sample 4 times manually.
++
++   vec2 center_dist = s - 0.5;
++   vec2 f = (center_dist - clamp(center_dist, -region_range, region_range)) * scale + 0.5;
++
++   vec2 mod_texel = texel_floored + f;
++
++   vec3 res = COMPAT_TEXTURE(Source, mod_texel / SourceSize.xy).xyz;
++
++   // thick scanlines (thickness pre-calculated in vertex shader based on source resolution)
++   vec2 sine_comp = vec2(SCANLINE_HORIZONTAL_MODULATION, SCANLINE_VERTICAL_MODULATION);
++
++   vec3 scanline = res * (SCANLINE_BASE_BRIGHTNESS + dot(sine_comp * sin(vTexCoord * omega), vec2(1.0, 1.0)));
++   FragColor = vec4(scanline.rgb, 1.0);
++} 
++#undef main
++void main()
++{
++    dsf_main();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/sharp-bilinear.frag b/shaders/sharp-bilinear.frag
+new file mode 100644
+index 0000000..7ff3309
+--- /dev/null
++++ b/shaders/sharp-bilinear.frag
+@@ -0,0 +1,93 @@
++// sharp-bilinear: libretro's interpolation/shaders/sharp-bilinear-simple.glsl (github.com/libretro/glsl-shaders), as a BananaOS shader (SuperDrastic and BananaDS)
++// for a DS screen drawn to the panel. Converted by tools/shaders/conv.py (SuperDrastic) (SuperDrastic): its fragment stage, libretro's names
++// mapped onto u_texture, u_texture_size, u_output_size and v_texcoord; its parameters at their defaults.
++// The original's top (its notice and parameters):
++/*
++   Author: rsn8887 (based on TheMaister)
++   License: Public domain
++
++   This is an integer prescale filter that should be combined
++   with a bilinear hardware filtering (GL_BILINEAR filter or some such) to achieve
++   a smooth scaling result with minimum blur. This is good for pixelgraphics
++   that are scaled by non-integer factors.
++   
++   The prescale factor and texel coordinates are precalculated
++   in the vertex shader for speed.
++*/
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define Texture u_texture
++#define TextureSize u_texture_size
++#define InputSize u_texture_size
++#define OrigInputSize u_texture_size
++#define OutputSize u_output_size
++#define FrameCount 0
++#define FrameDirection 1
++#define TEX0 vec4(v_texcoord, 0.0, 0.0)
++#define COL0 vec4(1.0)
++#define precalc_texel (v_texcoord * u_texture_size)
++#define precalc_scale (max(floor(u_output_size / u_texture_size), vec2(1.0, 1.0)))
++#define main dsf_main
++
++
++#if __VERSION__ >= 130
++#define COMPAT_VARYING in
++#define COMPAT_TEXTURE texture
++#else
++#define COMPAT_VARYING varying
++#define FragColor gl_FragColor
++#define COMPAT_TEXTURE texture2D
++#endif
++
++#ifdef GL_ES
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++#define COMPAT_PRECISION mediump
++#else
++#define COMPAT_PRECISION
++#endif
++
++
++// fragment compatibility #defines
++#define Source Texture
++#define vTexCoord TEX0.xy
++
++#define SourceSize vec4(TextureSize, 1.0 / TextureSize) //either TextureSize or InputSize
++#define outsize vec4(OutputSize, 1.0 / OutputSize)
++
++
++void main()
++{
++   vec2 texel = precalc_texel;
++   vec2 scale = precalc_scale;
++
++   vec2 texel_floored = floor(texel);
++   vec2 s = fract(texel);
++   vec2 region_range = 0.5 - 0.5 / scale;
++
++   // Figure out where in the texel to sample to get correct pre-scaled bilinear.
++   // Uses the hardware bilinear interpolator to avoid having to sample 4 times manually.
++
++   vec2 center_dist = s - 0.5;
++   vec2 f = (center_dist - clamp(center_dist, -region_range, region_range)) * scale + 0.5;
++
++   vec2 mod_texel = texel_floored + f;
++
++   FragColor = vec4(COMPAT_TEXTURE(Source, mod_texel / SourceSize.xy).rgb, 1.0);
++} 
++#undef main
++void main()
++{
++    dsf_main();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/zfast-crt.frag b/shaders/zfast-crt.frag
+new file mode 100644
+index 0000000..be1f923
+--- /dev/null
++++ b/shaders/zfast-crt.frag
+@@ -0,0 +1,156 @@
++// zfast-crt: libretro's crt/shaders/zfast_crt.glsl (github.com/libretro/glsl-shaders), as a BananaOS shader (SuperDrastic and BananaDS)
++// for a DS screen drawn to the panel. Converted by tools/shaders/conv.py (SuperDrastic) (SuperDrastic): its fragment stage, libretro's names
++// mapped onto u_texture, u_texture_size, u_output_size and v_texcoord; its parameters at their defaults.
++// The original's top (its notice and parameters):
++/*
++    zfast_crt_standard - A simple, fast CRT shader.
++
++    Copyright (C) 2017 Greg Hogan (SoltanGris42)
++
++    This program is free software; you can redistribute it and/or modify it
++    under the terms of the GNU General Public License as published by the Free
++    Software Foundation; either version 2 of the License, or (at your option)
++    any later version.
++
++
++Notes:  This shader does scaling with a weighted linear filter for adjustable
++	sharpness on the x and y axes based on the algorithm by Inigo Quilez here:
++	http://http://www.iquilezles.org/www/articles/texture/texture.htm
++	but modified to be somewhat sharper.  Then a scanline effect that varies
++	based on pixel brighness is applied along with a monochrome aperture mask.
++	This shader runs at 60fps on the Raspberry Pi 3 hardware at 2mpix/s
++	resolutions (1920x1080 or 1600x1200).
++*/
++
++//For testing compilation 
++//#define FRAGMENT
++//#define VERTEX
++
++//This can't be an option without slowing the shader down
++//Comment this out for a coarser 3 pixel mask...which is currently broken
++//on SNES Classic Edition due to Mali 400 gpu precision
++#define FINEMASK
++//Some drivers don't return black with texture coordinates out of bounds
++//SNES Classic is too slow to black these areas out when using fullscreen
++//overlays.  But you can uncomment the below to black them out if necessary
++//#define BLACK_OUT_BORDER
++
++// Parameter lines go here:
++#pragma parameter BLURSCALEX "Blur Amount X-Axis" 0.30 0.0 1.0 0.05
++#pragma parameter LOWLUMSCAN "Scanline Darkness - Low" 6.0 0.0 10.0 0.5
++#pragma parameter HILUMSCAN "Scanline Darkness - High" 8.0 0.0 50.0 1.0
++#pragma parameter BRIGHTBOOST "Dark Pixel Brightness Boost" 1.25 0.5 1.5 0.05
++#pragma parameter MASK_DARK "Mask Effect Amount" 0.25 0.0 1.0 0.05
++#pragma parameter MASK_FADE "Mask/Scanline Fade" 0.8 0.0 1.0 0.05
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define Texture u_texture
++#define TextureSize u_texture_size
++#define InputSize u_texture_size
++#define OrigInputSize u_texture_size
++#define OutputSize u_output_size
++#define FrameCount 0
++#define FrameDirection 1
++#define TEX0 vec4(v_texcoord, 0.0, 0.0)
++#define COL0 vec4(1.0)
++#define maskFade (0.3333 * MASK_FADE)
++#define invDims (1.0 / u_texture_size)
++#define main dsf_main
++
++
++#ifdef GL_ES
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++#define COMPAT_PRECISION highp
++#else 
++#define COMPAT_PRECISION mediump
++#endif
++#else
++#define COMPAT_PRECISION
++#endif
++
++#if __VERSION__ >= 130
++#define COMPAT_VARYING in
++#define COMPAT_TEXTURE texture
++out COMPAT_PRECISION vec4 FragColor;
++#else
++#define COMPAT_VARYING varying
++#define FragColor gl_FragColor
++#define COMPAT_TEXTURE texture2D
++#endif
++
++
++// compatibility #defines
++#define Source Texture
++#define vTexCoord TEX0.xy
++#define texture(c, d) COMPAT_TEXTURE(c, d)
++#define SourceSize vec4(TextureSize, 1.0 / TextureSize) //either TextureSize or InputSize
++#define OutSize vec4(OutputSize, 1.0 / OutputSize)
++
++#ifdef PARAMETER_UNIFORM
++// All parameter floats need to have COMPAT_PRECISION in front of them
++uniform COMPAT_PRECISION float BLURSCALEX;
++//uniform COMPAT_PRECISION float BLURSCALEY;
++uniform COMPAT_PRECISION float LOWLUMSCAN;
++uniform COMPAT_PRECISION float HILUMSCAN;
++uniform COMPAT_PRECISION float BRIGHTBOOST;
++uniform COMPAT_PRECISION float MASK_DARK;
++uniform COMPAT_PRECISION float MASK_FADE;
++#else
++#define BLURSCALEX 0.45
++//#define BLURSCALEY 0.20
++#define LOWLUMSCAN 5.0
++#define HILUMSCAN 10.0
++#define BRIGHTBOOST 1.25
++#define MASK_DARK 0.25
++#define MASK_FADE 0.8
++#endif
++
++void main()
++{
++
++	//This is just like "Quilez Scaling" but sharper
++	COMPAT_PRECISION vec2 p = vTexCoord * TextureSize;
++	COMPAT_PRECISION vec2 i = floor(p) + 0.50;
++	COMPAT_PRECISION vec2 f = p - i;
++	p = (i + 4.0*f*f*f)*invDims;
++	p.x = mix( p.x , vTexCoord.x, BLURSCALEX);
++	COMPAT_PRECISION float Y = f.y*f.y;
++	COMPAT_PRECISION float YY = Y*Y;
++#define ratio SourceSize.x/InputSize.x	
++#if defined(FINEMASK) 
++	COMPAT_PRECISION float whichmask = floor(vTexCoord.x*OutputSize.x*ratio)*-0.5;
++	COMPAT_PRECISION float mask = 1.0 + float(fract(whichmask) < 0.5) * -MASK_DARK;
++#else
++	COMPAT_PRECISION float whichmask = floor(vTexCoord.x*OutputSize.x*ratio)*-0.3333;
++	COMPAT_PRECISION float mask = 1.0 + float(fract(whichmask) < 0.3333) * -MASK_DARK;
++#endif
++	COMPAT_PRECISION vec3 colour = COMPAT_TEXTURE(Source, p).rgb;
++	
++	COMPAT_PRECISION float scanLineWeight = (BRIGHTBOOST - LOWLUMSCAN*(Y - 2.05*YY));
++	COMPAT_PRECISION float scanLineWeightB = 1.0 - HILUMSCAN*(YY-2.8*YY*Y);	
++	
++#if defined(BLACK_OUT_BORDER)
++	colour.rgb*=float(tc.x > 0.0)*float(tc.y > 0.0); //why doesn't the driver do the right thing?
++#endif
++
++	FragColor.rgba = vec4(colour.rgb*mix(scanLineWeight*mask, scanLineWeightB, dot(colour.rgb,vec3(maskFade))),1.0);
++	
++} 
++#undef main
++void main()
++{
++    dsf_main();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/zfast-lcd.frag b/shaders/zfast-lcd.frag
+new file mode 100644
+index 0000000..b75a2a2
+--- /dev/null
++++ b/shaders/zfast-lcd.frag
+@@ -0,0 +1,128 @@
++// zfast-lcd: libretro's handheld/shaders/zfast_lcd.glsl (github.com/libretro/glsl-shaders), as a BananaOS shader (SuperDrastic and BananaDS)
++// for a DS screen drawn to the panel. Converted by tools/shaders/conv.py (SuperDrastic) (SuperDrastic): its fragment stage, libretro's names
++// mapped onto u_texture, u_texture_size, u_output_size and v_texcoord; its parameters at their defaults.
++// The original's top (its notice and parameters):
++/*
++    zfast_lcd_standard - A very simple LCD shader meant to be used at 1080p
++		on the raspberry pi 3.
++		
++    Copyright (C) 2017 Greg Hogan (SoltanGris42)
++
++    This program is free software; you can redistribute it and/or modify it
++    under the terms of the GNU General Public License as published by the Free
++    Software Foundation; either version 2 of the License, or (at your option)
++    any later version.
++
++
++Notes:  This shader just does nearest neighbor scaling of the game and then
++		darkens the border pixels to imitate an LCD screen. You can change the
++		amount of darkening and the thickness of the borders.  You can also 
++		do basic gamma adjustment.
++		
++*/
++
++//For testing compilation 
++//#define FRAGMENT
++//#define VERTEX
++//#define GBAGAMMA 
++
++//Some drivers don't return black with texture coordinates out of bounds
++//SNES Classic is too slow to black these areas out when using fullscreen
++//overlays.  But you can uncomment the below to black them out if necessary
++
++#define BLACK_OUT_BORDER
++
++#pragma parameter BORDERMULT "Border Multiplier" 14.0 -40.0 40.0 1.0
++#pragma parameter GBAGAMMA "GBA Gamma Hack" 1.0 0.0 1.0 1.0
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define Texture u_texture
++#define TextureSize u_texture_size
++#define InputSize u_texture_size
++#define OrigInputSize u_texture_size
++#define OutputSize u_output_size
++#define FrameCount 0
++#define FrameDirection 1
++#define TEX0 vec4(v_texcoord, 0.0, 0.0)
++#define COL0 vec4(1.0)
++#define invSize (1.0 / u_texture_size)
++#define main dsf_main
++
++
++#ifdef GL_ES
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++#define COMPAT_PRECISION mediump
++#else
++#define COMPAT_PRECISION
++#endif
++
++#if __VERSION__ >= 130
++#define COMPAT_VARYING in
++#define COMPAT_TEXTURE texture
++out COMPAT_PRECISION vec4 FragColor;
++#else
++#define COMPAT_VARYING varying
++#define FragColor gl_FragColor
++#define COMPAT_TEXTURE texture2D
++#endif
++
++
++// compatibility #defines
++#define Source Texture
++#define vTexCoord TEX0.xy
++#define SourceSize vec4(TextureSize, 1.0 / TextureSize) //either TextureSize or InputSize
++#define OutSize vec4(OutputSize, 1.0 / OutputSize)
++
++#ifdef PARAMETER_UNIFORM
++uniform COMPAT_PRECISION float BORDERMULT;
++uniform COMPAT_PRECISION float GBAGAMMA;
++#else
++#define BORDERMULT 14.0
++#define GBAGAMMA 1.0
++#endif
++
++void main()
++{
++	COMPAT_PRECISION vec2 texcoordInPixels = TEX0.xy * TextureSize.xy / InputSize.xy * OrigInputSize.xy;
++	COMPAT_PRECISION vec2 centerCoord = floor(texcoordInPixels.xy)+vec2(0.5,0.5);
++	COMPAT_PRECISION vec2 sourceCoordInPixels = TEX0.xy * TextureSize.xy;
++	COMPAT_PRECISION vec2 sourceCenterCoord = floor(sourceCoordInPixels.xy)+vec2(0.5,0.5);
++	COMPAT_PRECISION vec2 distFromCenter = abs(centerCoord - texcoordInPixels);
++
++	COMPAT_PRECISION float Y = max(distFromCenter.x,(distFromCenter.y));
++
++	Y=Y*Y;
++	COMPAT_PRECISION float YY = Y*Y;
++	COMPAT_PRECISION float YYY = YY*Y;
++
++	COMPAT_PRECISION float LineWeight = YY - 2.7*YYY;
++	LineWeight = 1.0 - BORDERMULT*LineWeight;
++
++	COMPAT_PRECISION vec3 colour = COMPAT_TEXTURE(Texture, invSize*sourceCenterCoord).rgb*LineWeight;
++
++//#if defined(GBAGAMMA)
++//	//colour.rgb = pow(colour.rgb, vec3(1.35));
++//	colour.rgb*=0.6+0.4*(colour.rgb); //fake gamma because the pi is too slow!
++//#endif
++	if (GBAGAMMA > 0.5)
++		colour.rgb*=0.6+0.4*(colour.rgb); //fake gamma because the pi is too slow!
++		
++	FragColor = vec4(colour.rgb , 1.0);
++}
++#undef main
++void main()
++{
++    dsf_main();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/tools/shaders/conv.py b/tools/shaders/conv.py
+new file mode 100644
+index 0000000..68a2bf0
+--- /dev/null
++++ b/tools/shaders/conv.py
+@@ -0,0 +1,72 @@
++# conv.py <libretro .glsl> <out .frag> <title>: libretro's single-pass GLSL (VERTEX/FRAGMENT in one file) as a
++# SuperDrastic/BananaDS fragment shader (u_texture, u_texture_size, u_output_size, v_texcoord, SWIZ)
++import sys, re
++src, out, title = sys.argv[1], sys.argv[2], sys.argv[3]
++t = open(src, encoding='latin-1').read()
++head = t.split('#if defined(VERTEX)')[0]
++m = re.search(r'#elif defined\(FRAGMENT\)(.*)#endif\s*$', t, re.S)
++if not m: sys.exit('no fragment section')
++frag = m.group(1)
++vert = t.split('#if defined(VERTEX)')[1].split('#elif defined(FRAGMENT)')[0]
++# varyings the vertex stage computes, besides TEX0: known ones become macros
++extra = []
++known = {
++  'InvInputHeight': '(1.0 / u_texture_size.y)',
++  'invDims': '(1.0 / u_texture_size)',
++  'precalc_texel': '(v_texcoord * u_texture_size)',
++  'precalc_scale': '(max(floor(u_output_size / u_texture_size), vec2(1.0, 1.0)))',
++  'omega': '(vec2(3.141592654 * u_output_size.x, 2.0 * 3.141592654 * u_texture_size.y))',
++  'ps': '(1.0 / u_texture_size)',
++  'dx': '(1.0 / u_texture_size.x)', 'dy': '(1.0 / u_texture_size.y)',
++  'scale': '(u_output_size / u_texture_size)',
++  'OGL2Pos': '(v_texcoord * u_texture_size)',
++  'TextureSize_': 'u_texture_size',
++  'COL0': 'vec4(1.0)',
++  'invSize': '(1.0 / u_texture_size)',
++  'maskFade': '(0.3333 * MASK_FADE)',
++}
++for v in re.findall(r'(?:COMPAT_VARYING|varying)\s+(?:COMPAT_PRECISION\s+)?\w+\s+(\w+)\s*;', vert):
++    if v == 'TEX0': continue
++    if v not in known: sys.exit('unknown varying ' + v)
++    extra.append('#define %s %s' % (v, known[v]))
++# drop declarations the adapter provides
++drop = re.compile(r'^\s*(uniform\s+(COMPAT_PRECISION\s+)?\w+\s+(FrameDirection|FrameCount|OutputSize|TextureSize|InputSize|OrigInputSize|SourceSize|OutSize|Texture|Source|OrigTexture|Prev\w*)\s*;|(COMPAT_VARYING|varying)\s+.*;|out\s+vec4\s+FragColor\s*;)')
++lines = [l for l in frag.splitlines() if not drop.match(l)]
++frag = '\n'.join(lines)
++pre = '''// %s: libretro's %s (github.com/libretro/glsl-shaders), as a BananaOS shader (SuperDrastic and BananaDS)
++// for a DS screen drawn to the panel. Converted by tools/shaders/conv.py: its fragment stage, libretro's names
++// mapped onto u_texture, u_texture_size, u_output_size and v_texcoord; its parameters at their defaults.
++// The original's top (its notice and parameters):
++%s
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define Texture u_texture
++#define TextureSize u_texture_size
++#define InputSize u_texture_size
++#define OrigInputSize u_texture_size
++#define OutputSize u_output_size
++#define FrameCount 0
++#define FrameDirection 1
++#define TEX0 vec4(v_texcoord, 0.0, 0.0)
++%s
++#define main dsf_main
++''' % (title, src.split('glslsh/')[-1], head.strip(), '\n'.join(extra))
++post = '''
++#undef main
++void main()
++{
++    dsf_main();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
++'''
++# the version and precision lines in the fragment section are fine (ES 1.00 skips the >= 130 branch)
++full = pre + frag + post
++full = re.sub(r'^\s*#version.*$', '', full, flags=re.M)
++open(out, 'w').write(full)
+-- 
+2.56.0
+
+
+From 3c0015271a3d43fec78d3754d703c41950a200fc Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 17:38:36 +0200
+Subject: [PATCH 03/11] Ten shaders from Anbernic's DraStic and NNDDSS,
+ converted from DraStic's post-FX format
+
+tools/shaders/conv-dfx.py turns a single-pass DraStic .dfx/.dsd into this
+project's fragment shader (the vertex stage computed per pixel, DraStic's
+u_texture_size/u_target_size/u_time mapped; NNDDSS's fixed screen scale
+taken from the frame's size, so the dot grid fits 1x and 2x alike).
+Included at the project owner's request (no licence notice in the
+originals; THIRD_PARTY.md): DraStic's lcd1x, lcd1x + nds_color, Quilez,
+sharp_bilinear (+ nds_color), zfast_lcd (+ nds_color); NNDDSS's
+Dot_MiZai, Dot_MiZai-rgds+, retro-tiles-rgds+. 0.9-3.8 ms a screen on the
+RG DS's GPU; DraStic's Scanline (24 ms) and the multi-pass ones (FXAA,
+SMAA, HQ2X, Scale2X) left out.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SoPzircPRmhYJPUYUWuUMW
+(cherry picked from commit 9daf673f6c113c215a7abf064433b1dcba18f066)
+---
+ THIRD_PARTY.md                                |   8 +
+ shaders/drastic-lcd1x-nds-color.frag          |  90 +++++++++++
+ shaders/drastic-lcd1x.frag                    |  69 +++++++++
+ shaders/drastic-quilez.frag                   |  38 +++++
+ shaders/drastic-sharp-bilinear-nds-color.frag |  72 +++++++++
+ shaders/drastic-sharp-bilinear.frag           |  50 ++++++
+ shaders/drastic-zfast-lcd-nds-color.frag      |  87 +++++++++++
+ shaders/drastic-zfast-lcd.frag                |  65 ++++++++
+ shaders/nnddss-dot-mizai-rgds.frag            | 143 ++++++++++++++++++
+ shaders/nnddss-dot-mizai.frag                 | 143 ++++++++++++++++++
+ shaders/nnddss-retro-tiles.frag               | 121 +++++++++++++++
+ tools/shaders/conv-dfx.py                     |  78 ++++++++++
+ 12 files changed, 964 insertions(+)
+ create mode 100644 shaders/drastic-lcd1x-nds-color.frag
+ create mode 100644 shaders/drastic-lcd1x.frag
+ create mode 100644 shaders/drastic-quilez.frag
+ create mode 100644 shaders/drastic-sharp-bilinear-nds-color.frag
+ create mode 100644 shaders/drastic-sharp-bilinear.frag
+ create mode 100644 shaders/drastic-zfast-lcd-nds-color.frag
+ create mode 100644 shaders/drastic-zfast-lcd.frag
+ create mode 100644 shaders/nnddss-dot-mizai-rgds.frag
+ create mode 100644 shaders/nnddss-dot-mizai.frag
+ create mode 100644 shaders/nnddss-retro-tiles.frag
+ create mode 100644 tools/shaders/conv-dfx.py
+
+diff --git a/THIRD_PARTY.md b/THIRD_PARTY.md
+index bf95056..85366fe 100644
+--- a/THIRD_PARTY.md
++++ b/THIRD_PARTY.md
+@@ -22,3 +22,11 @@ shaders are read from ROCKNIX's `libdrastouch.so` at run time when present, and
+ The libretro shaders above (github.com/libretro/glsl-shaders) are converted to this project's shader interface by
+ `tools/shaders/conv.py` (their fragment stage, libretro's names mapped onto u_texture, u_texture_size, u_output_size
+ and v_texcoord, parameters at their defaults); each file keeps the original's notice at its top.
++
++Shaders converted from DraStic's post-FX format by `tools/shaders/conv-dfx.py` and included at the project owner's
++request; their files carry no licence notice:
++
++| What | Where | From |
++|---|---|---|
++| DraStic's lcd1x, lcd1x + nds_color, Quilez, sharp_bilinear (+ nds_color), zfast_lcd (+ nds_color) | `shaders/drastic-*.frag` | Android DraStic (Exophase), as bundled on Anbernic's RG DS |
++| Dot_MiZai, Dot_MiZai-rgds+, retro-tiles-rgds+ (Hyllian's retro-tiles, ported by MiZai) | `shaders/nnddss-*.frag` | Anbernic's NNDDSS 1.0.2 update for the RG DS Plus (win.anbernic.com) |
+diff --git a/shaders/drastic-lcd1x-nds-color.frag b/shaders/drastic-lcd1x-nds-color.frag
+new file mode 100644
+index 0000000..6098a72
+--- /dev/null
++++ b/shaders/drastic-lcd1x-nds-color.frag
+@@ -0,0 +1,90 @@
++// drastic-lcd1x-nds-color: DraStic's lcd1x + nds_color (Android DraStic, as bundled by Anbernic), as a BananaOS shader (SuperDrastic and BananaDS) for a DS screen drawn to the panel.
++// Converted by tools/shaders/conv-dfx.py from DraStic's post-FX format (.dfx + .dsd): its vertex stage computed per
++// pixel, DraStic's built-ins mapped onto u_texture, u_texture_size, u_output_size and v_texcoord.
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
++
++vec2 v_texture_coordinate;
++
++void dsf_vert()
++{
++	v_texture_coordinate = v_texcoord;
++
++}
++
++// Configuration
++#define BRIGHTEN_SCANLINES 16.0 // "Brighten Scanlines" - default: 16.0, min: 1.0, max: 32.0, step: 0.5
++										  // (brightness of horizontal lines)
++#define BRIGHTEN_LCD 4.0        // "Brighten LCD"       - default:  4.0, min: 1.0, max: 12.0, step: 0.1
++										  // (brightness of vertical lines)
++
++#ifndef BRIGHTEN_SCANLINES
++#define BRIGHTEN_SCANLINES 16.0
++#endif
++#ifndef BRIGHTEN_LCD
++#define BRIGHTEN_LCD 4.0
++#endif
++
++#define PI 3.141592654
++
++// Colour defines...
++#define target_gamma 1.91
++#define display_gamma 1.91
++#define lum 0.89
++#define r 0.87
++#define g 0.645
++#define b 0.73
++#define rg 0.10
++#define rb 0.10
++#define gr 0.255
++#define gb 0.17
++#define br -0.125
++#define bg 0.255
++
++const float NDS_SCREEN_HEIGHT = 192.0;
++const float INV_BRIGHTEN_SCANLINES_INC = 1.0 / (BRIGHTEN_SCANLINES + 1.0);
++const float INV_BRIGHTEN_LCD_INC = 1.0 / (BRIGHTEN_LCD + 1.0);
++
++void dsf_frag()
++{
++	// Note to self: uniform vec4 DSF_TS(1.0/w, 1.0/h, w, h)
++	
++	// Generate LCD grid effect
++	// > Note the 0.25 pixel offset -> required to ensure that
++	//   scanlines occur *between* pixels
++	// > Divide pixel coordinate by current scale factor (texture_height / NDS_SCREEN_HEIGHT)
++	vec2 angle = 2.0 * PI * (((v_texture_coordinate.xy * DSF_TS.zw) * NDS_SCREEN_HEIGHT * DSF_TS.y) - 0.25);
++	
++	float yfactor = (BRIGHTEN_SCANLINES + sin(angle.y)) * INV_BRIGHTEN_SCANLINES_INC;
++	float xfactor = (BRIGHTEN_LCD + sin(angle.x)) * INV_BRIGHTEN_LCD_INC;
++	
++	// Get colour sample and apply colour correction
++	vec3 colour = pow(texture2D(u_texture, v_texture_coordinate.xy).rgb, vec3(target_gamma));
++	colour = clamp(colour * lum, 0.0, 1.0);
++	colour = pow(
++		mat3(r,  rg, rb,
++			  gr, g,  gb,
++			  br, bg, b) * colour,
++		vec3(1.0 / display_gamma)
++	);
++	
++	// Apply LCD grid effect
++	colour.rgb = yfactor * xfactor * colour.rgb;
++	
++	gl_FragColor = vec4(colour.rgb, 1.0);
++}
++
++void main()
++{
++    dsf_vert();
++    dsf_frag();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/drastic-lcd1x.frag b/shaders/drastic-lcd1x.frag
+new file mode 100644
+index 0000000..fb0cfea
+--- /dev/null
++++ b/shaders/drastic-lcd1x.frag
+@@ -0,0 +1,69 @@
++// drastic-lcd1x: DraStic's lcd1x (Android DraStic, as bundled by Anbernic), as a BananaOS shader (SuperDrastic and BananaDS) for a DS screen drawn to the panel.
++// Converted by tools/shaders/conv-dfx.py from DraStic's post-FX format (.dfx + .dsd): its vertex stage computed per
++// pixel, DraStic's built-ins mapped onto u_texture, u_texture_size, u_output_size and v_texcoord.
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
++
++vec2 v_texture_coordinate;
++
++void dsf_vert()
++{
++	v_texture_coordinate = v_texcoord;
++
++}
++
++// Configuration
++#define BRIGHTEN_SCANLINES 16.0 // "Brighten Scanlines" - default: 16.0, min: 1.0, max: 32.0, step: 0.5
++										  // (brightness of horizontal lines)
++#define BRIGHTEN_LCD 4.0        // "Brighten LCD"       - default:  4.0, min: 1.0, max: 12.0, step: 0.1
++										  // (brightness of vertical lines)
++
++#ifndef BRIGHTEN_SCANLINES
++#define BRIGHTEN_SCANLINES 16.0
++#endif
++#ifndef BRIGHTEN_LCD
++#define BRIGHTEN_LCD 4.0
++#endif
++
++#define PI 3.141592654
++
++const float NDS_SCREEN_HEIGHT = 192.0;
++const float INV_BRIGHTEN_SCANLINES_INC = 1.0 / (BRIGHTEN_SCANLINES + 1.0);
++const float INV_BRIGHTEN_LCD_INC = 1.0 / (BRIGHTEN_LCD + 1.0);
++
++void dsf_frag()
++{
++	// Note to self: uniform vec4 DSF_TS(1.0/w, 1.0/h, w, h)
++	
++	// Generate LCD grid effect
++	// > Note the 0.25 pixel offset -> required to ensure that
++	//   scanlines occur *between* pixels
++	// > Divide pixel coordinate by current scale factor (texture_height / NDS_SCREEN_HEIGHT)
++	vec2 angle = 2.0 * PI * (((v_texture_coordinate.xy * DSF_TS.zw) * NDS_SCREEN_HEIGHT * DSF_TS.y) - 0.25);
++	
++	float yfactor = (BRIGHTEN_SCANLINES + sin(angle.y)) * INV_BRIGHTEN_SCANLINES_INC;
++	float xfactor = (BRIGHTEN_LCD + sin(angle.x)) * INV_BRIGHTEN_LCD_INC;
++	
++	// Get colour sample
++	vec3 colour = texture2D(u_texture, v_texture_coordinate.xy).rgb;
++	
++	// Apply LCD grid effect
++	colour.rgb = yfactor * xfactor * colour.rgb;
++	
++	gl_FragColor = vec4(colour.rgb, 1.0);
++}
++
++void main()
++{
++    dsf_vert();
++    dsf_frag();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/drastic-quilez.frag b/shaders/drastic-quilez.frag
+new file mode 100644
+index 0000000..70e02c3
+--- /dev/null
++++ b/shaders/drastic-quilez.frag
+@@ -0,0 +1,38 @@
++// drastic-quilez: DraStic's Quilez (Android DraStic, as bundled by Anbernic), as a BananaOS shader (SuperDrastic and BananaDS) for a DS screen drawn to the panel.
++// Converted by tools/shaders/conv-dfx.py from DraStic's post-FX format (.dfx + .dsd): its vertex stage computed per
++// pixel, DraStic's built-ins mapped onto u_texture, u_texture_size, u_output_size and v_texcoord.
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
++
++vec2 v_texture_coordinate;
++void dsf_vert() {
++
++  v_texture_coordinate = v_texcoord;
++}
++
++void dsf_frag(){
++  vec2 s_tex = DSF_TS.zw;
++  vec2 p = v_texture_coordinate.xy * s_tex + vec2(0.5);
++  vec2 i = floor(p);
++  vec2 f = p - i;
++  f = f * f * f * (f * (f * 6.0 - vec2(15.0)) + vec2(10.0));
++  p = i + f;
++  p = (p - vec2(0.5)) / s_tex;
++  vec4 color = texture2D(u_texture, p);
++  gl_FragColor = vec4(color.rgb, 1.0);
++}
++
++void main()
++{
++    dsf_vert();
++    dsf_frag();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/drastic-sharp-bilinear-nds-color.frag b/shaders/drastic-sharp-bilinear-nds-color.frag
+new file mode 100644
+index 0000000..5eb25c4
+--- /dev/null
++++ b/shaders/drastic-sharp-bilinear-nds-color.frag
+@@ -0,0 +1,72 @@
++// drastic-sharp-bilinear-nds-color: DraStic's sharp_bilinear + nds_color (Android DraStic, as bundled by Anbernic), as a BananaOS shader (SuperDrastic and BananaDS) for a DS screen drawn to the panel.
++// Converted by tools/shaders/conv-dfx.py from DraStic's post-FX format (.dfx + .dsd): its vertex stage computed per
++// pixel, DraStic's built-ins mapped onto u_texture, u_texture_size, u_output_size and v_texcoord.
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
++
++vec2 precalc_texel;
++vec2 precalc_scale;
++
++void dsf_vert()
++{
++
++	
++	precalc_texel = v_texcoord * DSF_TS.zw;
++	precalc_scale = floor(u_output_size.xy / DSF_TS.zw) + 1.0;
++}
++
++// Colour defines...
++#define target_gamma 1.91
++#define display_gamma 1.91
++#define lum 0.89
++#define r 0.87
++#define g 0.645
++#define b 0.73
++#define rg 0.10
++#define rb 0.10
++#define gr 0.255
++#define gb 0.17
++#define br -0.125
++#define bg 0.255
++
++void dsf_frag()
++{
++	vec2 texel_floored = floor(precalc_texel);
++	vec2 s = fract(precalc_texel);
++	vec2 region_range = 0.5 - 0.5 / precalc_scale;
++	
++	// Figure out where in the texel to sample to get correct pre-scaled bilinear.
++	// Uses the hardware bilinear interpolator to avoid having to sample 4 times manually.
++	
++	vec2 center_dist = s - 0.5;
++	vec2 f = (center_dist - clamp(center_dist, -region_range, region_range)) * precalc_scale + 0.5;
++	
++	vec2 mod_texel = texel_floored + f;
++	
++	// Get colour sample and apply colour correction
++	vec3 colour = pow(texture2D(u_texture, mod_texel / DSF_TS.zw).rgb, vec3(target_gamma));
++	colour = clamp(colour * lum, 0.0, 1.0);
++	colour = pow(
++		mat3(r,  rg, rb,
++			  gr, g,  gb,
++			  br, bg, b) * colour,
++		vec3(1.0 / display_gamma)
++	);
++	
++	gl_FragColor = vec4(colour.rgb, 1.0);
++}
++
++void main()
++{
++    dsf_vert();
++    dsf_frag();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/drastic-sharp-bilinear.frag b/shaders/drastic-sharp-bilinear.frag
+new file mode 100644
+index 0000000..05bebb7
+--- /dev/null
++++ b/shaders/drastic-sharp-bilinear.frag
+@@ -0,0 +1,50 @@
++// drastic-sharp-bilinear: DraStic's sharp_bilinear (Android DraStic, as bundled by Anbernic), as a BananaOS shader (SuperDrastic and BananaDS) for a DS screen drawn to the panel.
++// Converted by tools/shaders/conv-dfx.py from DraStic's post-FX format (.dfx + .dsd): its vertex stage computed per
++// pixel, DraStic's built-ins mapped onto u_texture, u_texture_size, u_output_size and v_texcoord.
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
++
++vec2 precalc_texel;
++vec2 precalc_scale;
++
++void dsf_vert()
++{
++
++	
++	precalc_texel = v_texcoord * DSF_TS.zw;
++	precalc_scale = floor(u_output_size.xy / DSF_TS.zw) + 1.0;
++}
++
++void dsf_frag()
++{
++	vec2 texel_floored = floor(precalc_texel);
++	vec2 s = fract(precalc_texel);
++	vec2 region_range = 0.5 - 0.5 / precalc_scale;
++	
++	// Figure out where in the texel to sample to get correct pre-scaled bilinear.
++	// Uses the hardware bilinear interpolator to avoid having to sample 4 times manually.
++	
++	vec2 center_dist = s - 0.5;
++	vec2 f = (center_dist - clamp(center_dist, -region_range, region_range)) * precalc_scale + 0.5;
++	
++	vec2 mod_texel = texel_floored + f;
++	
++	vec3 colour = texture2D(u_texture, mod_texel / DSF_TS.zw).rgb;
++	
++	gl_FragColor = vec4(colour.rgb, 1.0);
++}
++
++void main()
++{
++    dsf_vert();
++    dsf_frag();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/drastic-zfast-lcd-nds-color.frag b/shaders/drastic-zfast-lcd-nds-color.frag
+new file mode 100644
+index 0000000..73b40dd
+--- /dev/null
++++ b/shaders/drastic-zfast-lcd-nds-color.frag
+@@ -0,0 +1,87 @@
++// drastic-zfast-lcd-nds-color: DraStic's zfast_lcd + nds_color (Android DraStic, as bundled by Anbernic), as a BananaOS shader (SuperDrastic and BananaDS) for a DS screen drawn to the panel.
++// Converted by tools/shaders/conv-dfx.py from DraStic's post-FX format (.dfx + .dsd): its vertex stage computed per
++// pixel, DraStic's built-ins mapped onto u_texture, u_texture_size, u_output_size and v_texcoord.
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
++
++vec2 v_texture_coordinate;
++
++void dsf_vert()
++{
++	v_texture_coordinate = v_texcoord;
++
++}
++
++// Configuration: BORDERMULT "Border Multiplier" 14.0 -40.0 40.0 1.0
++#define BORDERMULT 14.0
++
++#ifndef BORDERMULT
++#define BORDERMULT 14.0
++#endif
++
++// Colour defines...
++#define target_gamma 1.91
++#define display_gamma 1.91
++#define lum 0.89
++#define r 0.87
++#define g 0.645
++#define b 0.73
++#define rg 0.10
++#define rb 0.10
++#define gr 0.255
++#define gb 0.17
++#define br -0.125
++#define bg 0.255
++
++const float NDS_SCREEN_HEIGHT = 192.0;
++
++void dsf_frag()
++{
++	// Generate grid pattern (in native NDS coordinate space)
++	// - Have to divide by the current scale factor...
++	//   There can only be two values here:
++	//   > 'High-Resolution 3D Rendering' OFF - scale factor == 1
++	//   > 'High-Resolution 3D Rendering' ON  - scale factor == 2
++	//   But it's easiest to assume the general case...
++	//    scale_factor == texture_height / NDS_SCREEN_HEIGHT
++	vec2 texcoordInPixels = v_texture_coordinate.xy * DSF_TS.zw * (NDS_SCREEN_HEIGHT * DSF_TS.y);
++	vec2 centerCoord = floor(texcoordInPixels.xy) + vec2(0.5, 0.5);
++	vec2 distFromCenter = abs(centerCoord - texcoordInPixels);
++	
++	float Y = max(distFromCenter.x, distFromCenter.y);
++	
++	Y = Y * Y;
++	float YY = Y * Y;
++	float YYY = YY * Y;
++	
++	float LineWeight = YY - 2.7 * YYY;
++	LineWeight = 1.0 - BORDERMULT * LineWeight;
++	
++	// Apply colour correction
++	vec3 screen = pow(texture2D(u_texture, v_texture_coordinate.xy).rgb, vec3(target_gamma));
++	screen = clamp(screen * lum, 0.0, 1.0);
++	screen = pow(
++		mat3(r,  rg, rb,
++			  gr, g,  gb,
++			  br, bg, b) * screen,
++		vec3(1.0 / display_gamma)
++	);
++	
++	// Add grid lines
++	gl_FragColor = vec4(screen * LineWeight, 1.0);
++}
++
++void main()
++{
++    dsf_vert();
++    dsf_frag();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/drastic-zfast-lcd.frag b/shaders/drastic-zfast-lcd.frag
+new file mode 100644
+index 0000000..1d1a5e5
+--- /dev/null
++++ b/shaders/drastic-zfast-lcd.frag
+@@ -0,0 +1,65 @@
++// drastic-zfast-lcd: DraStic's zfast_lcd (Android DraStic, as bundled by Anbernic), as a BananaOS shader (SuperDrastic and BananaDS) for a DS screen drawn to the panel.
++// Converted by tools/shaders/conv-dfx.py from DraStic's post-FX format (.dfx + .dsd): its vertex stage computed per
++// pixel, DraStic's built-ins mapped onto u_texture, u_texture_size, u_output_size and v_texcoord.
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
++
++vec2 v_texture_coordinate;
++
++void dsf_vert()
++{
++	v_texture_coordinate = v_texcoord;
++
++}
++
++// Configuration: BORDERMULT "Border Multiplier" 14.0 -40.0 40.0 1.0
++#define BORDERMULT 14.0
++
++#ifndef BORDERMULT
++#define BORDERMULT 14.0
++#endif
++
++const float NDS_SCREEN_HEIGHT = 192.0;
++
++void dsf_frag()
++{
++	// Generate grid pattern (in native NDS coordinate space)
++	// - Have to divide by the current scale factor...
++	//   There can only be two values here:
++	//   > 'High-Resolution 3D Rendering' OFF - scale factor == 1
++	//   > 'High-Resolution 3D Rendering' ON  - scale factor == 2
++	//   But it's easiest to assume the general case...
++	//    scale_factor == texture_height / NDS_SCREEN_HEIGHT
++	vec2 texcoordInPixels = v_texture_coordinate.xy * DSF_TS.zw * (NDS_SCREEN_HEIGHT * DSF_TS.y);
++	vec2 centerCoord = floor(texcoordInPixels.xy) + vec2(0.5, 0.5);
++	vec2 distFromCenter = abs(centerCoord - texcoordInPixels);
++	
++	float Y = max(distFromCenter.x, distFromCenter.y);
++	
++	Y = Y * Y;
++	float YY = Y * Y;
++	float YYY = YY * Y;
++	
++	float LineWeight = YY - 2.7 * YYY;
++	LineWeight = 1.0 - BORDERMULT * LineWeight;
++	
++	// Get colour sample and apply grid effect
++	vec3 colour = texture2D(u_texture, v_texture_coordinate.xy).rgb * LineWeight;
++	
++	gl_FragColor = vec4(colour.rgb, 1.0);
++}
++
++void main()
++{
++    dsf_vert();
++    dsf_frag();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/nnddss-dot-mizai-rgds.frag b/shaders/nnddss-dot-mizai-rgds.frag
+new file mode 100644
+index 0000000..8c9aced
+--- /dev/null
++++ b/shaders/nnddss-dot-mizai-rgds.frag
+@@ -0,0 +1,143 @@
++// nnddss-dot-mizai-rgds: Anbernic NNDDSS 1.0.2's Dot_MiZai-rgds+, as a BananaOS shader (SuperDrastic and BananaDS) for a DS screen drawn to the panel.
++// Converted by tools/shaders/conv-dfx.py from DraStic's post-FX format (.dfx + .dsd): its vertex stage computed per
++// pixel, DraStic's built-ins mapped onto u_texture, u_texture_size, u_output_size and v_texcoord.
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
++
++// screen resolution scale (2.0 for current High-Resolution 3D Rendering)
++#define SCREEN_RES_SCALE (DSF_TS.x / 256.0)
++// dot softness in texels; 0 enables the fast path (single texel fetch)
++#define SOFT 0
++
++#ifndef SCREEN_RES_SCALE
++#define SCREEN_RES_SCALE (DSF_TS.x / 256.0)
++#endif
++
++#ifndef SOFT
++#define SOFT 0
++#endif
++
++vec2 v_texture_coordinate;
++#if SOFT != 0
++vec4 v_texture_coordinate_1;
++vec4 v_texture_coordinate_2;
++vec4 v_texture_coordinate_3;
++vec4 v_texture_coordinate_4;
++#endif
++
++vec2 pixel_no;
++
++vec4 v_video_size;
++
++#define screen_res_scale SCREEN_RES_SCALE
++
++void dsf_vert()
++{
++  v_video_size = vec4(DSF_TS.xy * screen_res_scale, DSF_TS.zw / screen_res_scale);
++
++  v_texture_coordinate = v_texcoord;
++#if SOFT != 0
++  vec2 dx = vec2(v_video_size.x, 0.0);
++  vec2 dy = vec2(0.0, v_video_size.y);
++  float soft = float(SOFT);
++  v_texture_coordinate_1.xy = v_texture_coordinate.xy - dx * soft - dy * soft;
++  v_texture_coordinate_1.zw = v_texture_coordinate.xy - dy * soft;
++  v_texture_coordinate_2.xy = v_texture_coordinate.xy + dx * soft - dy * soft;
++  v_texture_coordinate_2.zw = v_texture_coordinate.xy - dx * soft;
++  v_texture_coordinate_3.xy = v_texture_coordinate.xy + dx * soft;
++  v_texture_coordinate_3.zw = v_texture_coordinate.xy - dx * soft + dy * soft;
++  v_texture_coordinate_4.xy = v_texture_coordinate.xy + dy * soft;
++  v_texture_coordinate_4.zw = v_texture_coordinate.xy + dx * soft + dy * soft;
++#endif
++  pixel_no = v_texture_coordinate * v_video_size.zw;
++}
++
++// dot softness in texels; keep in sync with <vheader>
++#define SOFT 0
++
++#ifndef SOFT
++#define SOFT 0
++#endif
++
++#if SOFT != 0
++
++#endif
++
++const float gamma = 2.4;
++const float shine = 0.05;
++const float blend = 0.65;
++
++float dist(vec2 coord, vec2 source)
++{
++  vec2 delta = coord - source;
++  return sqrt(dot(delta, delta));
++}
++
++float color_bloom(vec3 color)
++{
++  const vec3 gray_coeff = vec3(0.30, 0.59, 0.11);
++  float bright = dot(color, gray_coeff);
++  return mix(1.0 + shine, 1.0 - shine, bright);
++}
++
++vec3 lookup(vec2 pixel_no, float offset_x, float offset_y, vec3 color)
++{
++  vec2 offset = vec2(offset_x, offset_y);
++  float delta = dist(fract(pixel_no), offset + vec2(0.5, 0.5));
++  return color * exp(-gamma * delta * color_bloom(color));
++}
++
++void dsf_frag()
++{
++#if SOFT == 0
++  vec3 texel = texture2D(u_texture, v_texture_coordinate).rgb;
++  vec3 c00 = texel;
++  vec3 c10 = texel;
++  vec3 c20 = texel;
++  vec3 c01 = texel;
++  vec3 c11 = texel;
++  vec3 c21 = texel;
++  vec3 c02 = texel;
++  vec3 c12 = texel;
++  vec3 c22 = texel;
++#else
++  vec3 c00 = texture2D(u_texture, v_texture_coordinate_1.xy).rgb;
++  vec3 c10 = texture2D(u_texture, v_texture_coordinate_1.zw).rgb;
++  vec3 c20 = texture2D(u_texture, v_texture_coordinate_2.xy).rgb;
++  vec3 c01 = texture2D(u_texture, v_texture_coordinate_2.zw).rgb;
++  vec3 c11 = texture2D(u_texture, v_texture_coordinate.xy).rgb;
++  vec3 c21 = texture2D(u_texture, v_texture_coordinate_3.xy).rgb;
++  vec3 c02 = texture2D(u_texture, v_texture_coordinate_3.zw).rgb;
++  vec3 c12 = texture2D(u_texture, v_texture_coordinate_4.xy).rgb;
++  vec3 c22 = texture2D(u_texture, v_texture_coordinate_4.zw).rgb;
++#endif
++  
++  vec3 mid_color = lookup(pixel_no, 0.0, 0.0, c11);
++  vec3 color = vec3(0.0, 0.0, 0.0);
++  color += lookup(pixel_no, -1.0, -1.0, c00);
++  color += lookup(pixel_no,  0.0, -1.0, c10);
++  color += lookup(pixel_no,  1.0, -1.0, c20);
++  color += lookup(pixel_no, -1.0,  0.0, c01);
++  color += mid_color;
++  color += lookup(pixel_no,  1.0,  0.0, c21);
++  color += lookup(pixel_no, -1.0,  1.0, c02);
++  color += lookup(pixel_no,  0.0,  1.0, c12);
++  color += lookup(pixel_no,  1.0,  1.0, c22);
++  gl_FragColor.rgb = mix(1.2 * mid_color, color, blend);
++  gl_FragColor.a = 1.0;
++}
++
++void main()
++{
++    dsf_vert();
++    dsf_frag();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/nnddss-dot-mizai.frag b/shaders/nnddss-dot-mizai.frag
+new file mode 100644
+index 0000000..19c04f3
+--- /dev/null
++++ b/shaders/nnddss-dot-mizai.frag
+@@ -0,0 +1,143 @@
++// nnddss-dot-mizai: Anbernic NNDDSS 1.0.2's Dot_MiZai, as a BananaOS shader (SuperDrastic and BananaDS) for a DS screen drawn to the panel.
++// Converted by tools/shaders/conv-dfx.py from DraStic's post-FX format (.dfx + .dsd): its vertex stage computed per
++// pixel, DraStic's built-ins mapped onto u_texture, u_texture_size, u_output_size and v_texcoord.
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
++
++// screen resolution scale (2.0 for current High-Resolution 3D Rendering)
++#define SCREEN_RES_SCALE (DSF_TS.x / 256.0)
++// dot softness in texels; 0 enables the fast path (single texel fetch)
++#define SOFT 0
++
++#ifndef SCREEN_RES_SCALE
++#define SCREEN_RES_SCALE (DSF_TS.x / 256.0)
++#endif
++
++#ifndef SOFT
++#define SOFT 0
++#endif
++
++vec2 v_texture_coordinate;
++#if SOFT != 0
++vec4 v_texture_coordinate_1;
++vec4 v_texture_coordinate_2;
++vec4 v_texture_coordinate_3;
++vec4 v_texture_coordinate_4;
++#endif
++
++vec2 pixel_no;
++
++vec4 v_video_size;
++
++#define screen_res_scale SCREEN_RES_SCALE
++
++void dsf_vert()
++{
++  v_video_size = vec4(DSF_TS.xy * screen_res_scale, DSF_TS.zw / screen_res_scale);
++
++  v_texture_coordinate = v_texcoord;
++#if SOFT != 0
++  vec2 dx = vec2(v_video_size.x, 0.0);
++  vec2 dy = vec2(0.0, v_video_size.y);
++  float soft = float(SOFT);
++  v_texture_coordinate_1.xy = v_texture_coordinate.xy - dx * soft - dy * soft;
++  v_texture_coordinate_1.zw = v_texture_coordinate.xy - dy * soft;
++  v_texture_coordinate_2.xy = v_texture_coordinate.xy + dx * soft - dy * soft;
++  v_texture_coordinate_2.zw = v_texture_coordinate.xy - dx * soft;
++  v_texture_coordinate_3.xy = v_texture_coordinate.xy + dx * soft;
++  v_texture_coordinate_3.zw = v_texture_coordinate.xy - dx * soft + dy * soft;
++  v_texture_coordinate_4.xy = v_texture_coordinate.xy + dy * soft;
++  v_texture_coordinate_4.zw = v_texture_coordinate.xy + dx * soft + dy * soft;
++#endif
++  pixel_no = v_texture_coordinate * v_video_size.zw;
++}
++
++// dot softness in texels; keep in sync with <vheader>
++#define SOFT 0
++
++#ifndef SOFT
++#define SOFT 0
++#endif
++
++#if SOFT != 0
++
++#endif
++
++const float gamma = 2.4;
++const float shine = 0.05;
++const float blend = 0.65;
++
++float dist(vec2 coord, vec2 source)
++{
++  vec2 delta = coord - source;
++  return sqrt(dot(delta, delta));
++}
++
++float color_bloom(vec3 color)
++{
++  const vec3 gray_coeff = vec3(0.30, 0.59, 0.11);
++  float bright = dot(color, gray_coeff);
++  return mix(1.0 + shine, 1.0 - shine, bright);
++}
++
++vec3 lookup(vec2 pixel_no, float offset_x, float offset_y, vec3 color)
++{
++  vec2 offset = vec2(offset_x, offset_y);
++  float delta = dist(fract(pixel_no), offset + vec2(0.5, 0.5));
++  return color * exp(-gamma * delta * color_bloom(color));
++}
++
++void dsf_frag()
++{
++#if SOFT == 0
++  vec3 texel = texture2D(u_texture, v_texture_coordinate).rgb;
++  vec3 c00 = texel;
++  vec3 c10 = texel;
++  vec3 c20 = texel;
++  vec3 c01 = texel;
++  vec3 c11 = texel;
++  vec3 c21 = texel;
++  vec3 c02 = texel;
++  vec3 c12 = texel;
++  vec3 c22 = texel;
++#else
++  vec3 c00 = texture2D(u_texture, v_texture_coordinate_1.xy).rgb;
++  vec3 c10 = texture2D(u_texture, v_texture_coordinate_1.zw).rgb;
++  vec3 c20 = texture2D(u_texture, v_texture_coordinate_2.xy).rgb;
++  vec3 c01 = texture2D(u_texture, v_texture_coordinate_2.zw).rgb;
++  vec3 c11 = texture2D(u_texture, v_texture_coordinate.xy).rgb;
++  vec3 c21 = texture2D(u_texture, v_texture_coordinate_3.xy).rgb;
++  vec3 c02 = texture2D(u_texture, v_texture_coordinate_3.zw).rgb;
++  vec3 c12 = texture2D(u_texture, v_texture_coordinate_4.xy).rgb;
++  vec3 c22 = texture2D(u_texture, v_texture_coordinate_4.zw).rgb;
++#endif
++  
++  vec3 mid_color = lookup(pixel_no, 0.0, 0.0, c11);
++  vec3 color = vec3(0.0, 0.0, 0.0);
++  color += lookup(pixel_no, -1.0, -1.0, c00);
++  color += lookup(pixel_no,  0.0, -1.0, c10);
++  color += lookup(pixel_no,  1.0, -1.0, c20);
++  color += lookup(pixel_no, -1.0,  0.0, c01);
++  color += mid_color;
++  color += lookup(pixel_no,  1.0,  0.0, c21);
++  color += lookup(pixel_no, -1.0,  1.0, c02);
++  color += lookup(pixel_no,  0.0,  1.0, c12);
++  color += lookup(pixel_no,  1.0,  1.0, c22);
++  gl_FragColor.rgb = mix(1.2 * mid_color, color, blend);
++  gl_FragColor.a = 1.0;
++}
++
++void main()
++{
++    dsf_vert();
++    dsf_frag();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/shaders/nnddss-retro-tiles.frag b/shaders/nnddss-retro-tiles.frag
+new file mode 100644
+index 0000000..210bee4
+--- /dev/null
++++ b/shaders/nnddss-retro-tiles.frag
+@@ -0,0 +1,121 @@
++// nnddss-retro-tiles: Anbernic NNDDSS 1.0.2's retro-tiles-rgds+ (Hyllian's, ported by MiZai), as a BananaOS shader (SuperDrastic and BananaDS) for a DS screen drawn to the panel.
++// Converted by tools/shaders/conv-dfx.py from DraStic's post-FX format (.dfx + .dsd): its vertex stage computed per
++// pixel, DraStic's built-ins mapped onto u_texture, u_texture_size, u_output_size and v_texcoord.
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
++
++#define SCREEN_RES_SCALE (DSF_TS.x / 256.0)
++
++#if GL_ES
++
++#endif
++// Configuration
++#define TILE_FORMAT 0.0   // "Tile Format [ Normal | Deep]" (0.0-1.0)
++#define TILE_DEPTH 1.0    // "Tile Depth" (0.0-1.0)
++#define TILE_SIZE 0.5     // "Tile Size" (0.4-0.6)
++#define COLOR_BOOST 1.0   // "Color Boost" (1.0-2.0)
++#define OVERSCAN 0.0      // "Over Scan" (-3.0-3.0)
++#define InputGamma 2.4    // "INPUT GAMMA" (0.0-4.0)
++#define OutputGamma 2.2   // "OUTPUT GAMMA" (0.0-3.0)
++
++#define GAMMA_IN(color)     pow(color, vec3(InputGamma))
++#define GAMMA_OUT(color)    pow(color, vec3(1.0 / OutputGamma))
++
++vec2 vTexCoord;
++
++void dsf_vert()
++{
++
++    // æ­¥éª¤1ï¼èªå¨è®¡ç®ZhengShuBeiï¼NDSåå§åè¾¨ççæ´æ°åï¼
++    float integer_scale_x = u_output_size.x / 256.0;
++    float integer_scale_y = u_output_size.y / 192.0;
++    float integer_scale = floor(min(integer_scale_x, integer_scale_y));  // åå®½é«åæ°æå°å¼å¹¶åä¸åæ´
++    integer_scale = max(integer_scale, 1.0);  // ç¡®ä¿ZhengShuBeiè³å°ä¸º1
++
++    // æ­¥éª¤2ï¼è®¡ç®åºåç®æ å°ºå¯¸ï¼256*integer_scale, 192*integer_scaleï¼
++    vec2 base_target_size = vec2(256.0 * integer_scale, 192.0 * integer_scale);
++
++    // æ­¥éª¤3ï¼åºäºåºåç®æ å°ºå¯¸è®¡ç®scale_factor
++    vec2 scale_factor = base_target_size / DSF_TS.zw;
++
++    // åºç¨è¿æ«æå¹¶éå¶æå°ç¼©æ¾
++    vec2 box_scale = scale_factor + OVERSCAN;
++    box_scale = vec2(min(box_scale.x, box_scale.y));
++    box_scale = max(box_scale, vec2(1.0 / SCREEN_RES_SCALE));
++
++    // è®¡ç®çº¹çåæ ç¼©æ¾æ¯ä¾
++    vec2 scale = scale_factor / box_scale;
++    vec2 middle = vec2(0.5);
++    vec2 diff = v_texcoord * 1.0001 - middle;  // é¿åç²¾åº¦ä¸¢å¤±
++    vTexCoord = middle + diff * scale;  // å±ä¸­å¹¶ç¼©æ¾çº¹çåæ 
++}
++
++#define SCREEN_RES_SCALE (DSF_TS.x / 256.0)
++
++#if GL_ES
++
++#endif
++// Configuration
++#define TILE_FORMAT 0.0   // "Tile Format [ Normal | Deep]" (0.0-1.0)
++#define TILE_DEPTH 1.0    // "Tile Depth" (0.0-1.0)
++#define TILE_SIZE 0.5     // "Tile Size" (0.4-0.6)
++#define COLOR_BOOST 1.0   // "Color Boost" (1.0-2.0)
++#define OVERSCAN 0.0      // "Over Scan" (-3.0-3.0)
++#define InputGamma 2.4    // "INPUT GAMMA" (0.0-4.0)
++#define OutputGamma 2.2   // "OUTPUT GAMMA" (0.0-3.0)
++
++#define GAMMA_IN(color)     pow(color, vec3(InputGamma))
++#define GAMMA_OUT(color)    pow(color, vec3(1.0 / OutputGamma))
++
++float fade(float size) {
++    size = clamp(size, -TILE_DEPTH, 1.0);
++    size = 1.0 - size * size * size * mix(size * size, 1.0, TILE_FORMAT);
++    return size * size;
++}
++
++void dsf_frag() {
++    // æå¨æ£æ¥çº¹çåæ æ¯å¦è¶åºææèå´ï¼è¶åºåè¾åºé»è²è¾¹æ¡
++    if (vTexCoord.x < 0.0 || vTexCoord.x > 1.0 || vTexCoord.y < 0.0 || vTexCoord.y > 1.0) {
++        gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);  // è¾¹æ¡é¢è²ï¼é»è²ï¼
++        return;
++    }
++    
++    // ç·ç ææè®¡ç®
++    vec2 pos = fract(vTexCoord * DSF_TS.zw / SCREEN_RES_SCALE) - vec2(0.5);
++    vec2 dir = sign(pos);
++    vec2 g1 = dir * vec2(DSF_TS.x, 0.0);  // 1/w step
++    vec2 g2 = dir * vec2(0.0, DSF_TS.y);  // 1/h step
++
++    // éæ ·ç¸é»åç´ (åå§é¢è²ï¼æ··åååç»ä¸å gamma)
++    vec3 A = texture2D(u_texture, vTexCoord).xyz;
++    vec3 B = texture2D(u_texture, vTexCoord + g1).xyz;
++    vec3 C = texture2D(u_texture, vTexCoord + g2).xyz;
++    vec3 D = texture2D(u_texture, vTexCoord + g1 + g2).xyz;
++
++    // ç·ç è¾¹ç¼æ··å
++    vec2 dx = vec2(pos.x, 1.0 - pos.x) / TILE_SIZE;
++    vec2 dy = vec2(pos.y, 1.0 - pos.y) / TILE_SIZE;
++    vec2 wx = vec2(fade(dx.x), fade(dx.y));
++    vec2 wy = vec2(fade(dy.x), fade(dy.y));
++    vec3 color = (A * wx.x + B * wx.y) * wy.x + (C * wx.x + D * wx.y) * wy.y;
++    color *= COLOR_BOOST;
++
++    // åæ¬¡åå¹¶ gammaï¼pow(color, InputGamma/OutputGamma)
++    // æ¿ä»£ååæ¯ä¸ªéæ ·å GAMMA_IN + æç» GAMMA_OUT ç 15 æ¬¡ pow
++    gl_FragColor = vec4(pow(color, vec3(InputGamma / OutputGamma)), 1.0);
++}
++
++void main()
++{
++    dsf_vert();
++    dsf_frag();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
+diff --git a/tools/shaders/conv-dfx.py b/tools/shaders/conv-dfx.py
+new file mode 100644
+index 0000000..740d342
+--- /dev/null
++++ b/tools/shaders/conv-dfx.py
+@@ -0,0 +1,78 @@
++# conv-dfx.py <shader.dfx> <out.frag> <title> <origin>: a single-pass DraStic post-FX shader (.dfx + .dsd, DraStic's and
++# Anbernic NNDDSS's format) as a SuperDrastic/BananaDS fragment shader. Its vertex stage runs per pixel at the top of
++# the fragment shader (its outputs are linear in the texture coordinate, so the result is the same); DraStic's
++# built-ins are mapped: u_texture_size (1/w, 1/h, w, h), u_target_size -> u_output_size, u_time -> 0.
++import sys, re, os
++dfx, out, title, origin = sys.argv[1:5]
++d = open(dfx, encoding='latin-1').read().replace('\r', '')
++def tag(t, txt):
++    return '\n'.join(re.findall(r'<%s>\n?(.*?)</%s>' % (t, t), txt, re.S))
++passes = re.findall(r'<pass>(.*?)</pass>', d, re.S)
++if len(passes) != 1: sys.exit('%d passes' % len(passes))
++p = passes[0]
++dsd_name = re.search(r'shader=(\S+)', p).group(1)
++samplers = re.findall(r'sampler:(\w+)=(\d+)', p)
++dsd = open(os.path.join(os.path.dirname(dfx), dsd_name), encoding='latin-1').read().replace('\r', '')
++vh, fh, hd = tag('vheader', d), tag('fheader', d), tag('header', d)
++inc = ''.join(open(os.path.join(os.path.dirname(dfx), f), encoding='latin-1').read().replace('\r','') for f in re.findall(r'<include>.*?file=(\S+).*?</include>', d, re.S))
++vs, fs = tag('vertex', dsd), tag('fragment', dsd)
++def strip_decls(code, keep_varyings_as_globals):
++    outl, glob = [], []
++    for l in code.split('\n'):
++        s = l.strip()
++        if re.match(r'(attribute|uniform)\s', s): continue
++        m = re.match(r'varying\s+(?:(?:lowp|mediump|highp)\s+)?(\w+\s+\w+\s*;)', s)
++        if m:
++            if keep_varyings_as_globals: glob.append(m.group(1))
++            outl.append('// (varying, a global here) ' + s if keep_varyings_as_globals else '')
++            if keep_varyings_as_globals: outl[-1] = m.group(1)
++            continue
++        if re.match(r'#version', s) or re.match(r'precision\s', s): continue
++        outl.append(l)
++    return '\n'.join(outl)
++vcode = strip_decls(vs, True)
++vcode = re.sub(r'^\s*gl_Position\s*=.*$', '', vcode, flags=re.M)
++vcode = re.sub(r'\bvoid\s+main\s*\(\s*(void)?\s*\)', 'void dsf_vert()', vcode)
++vcode = re.sub(r'\ba_texture_coordinate\b', 'v_texcoord', vcode)
++vcode = re.sub(r'\ba_vertex_coordinate\b', '(v_texcoord * 2.0 - 1.0)', vcode)
++fcode = strip_decls(fs, False)
++fcode = re.sub(r'\bvoid\s+main\s*\(\s*(void)?\s*\)', 'void dsf_frag()', fcode)
++# the screen scale some shaders fix at 1.0 (NNDDSS's Dot: 2.0 at 2x): from the frame's size instead
++pre_all = vh + '\n' + hd + '\n' + inc
++pre_all = re.sub(r'#define\s+SCREEN_RES_SCALE\s+[0-9.]+', '#define SCREEN_RES_SCALE (u_texture_size.x / 256.0)', pre_all)
++vcode = re.sub(r'#define\s+SCREEN_RES_SCALE\s+[0-9.]+', '#define SCREEN_RES_SCALE (u_texture_size.x / 256.0)', vcode)
++vcode = re.sub(r'const\s+float\s+screen_res_scale\s*=\s*SCREEN_RES_SCALE\s*;', '#define screen_res_scale SCREEN_RES_SCALE', vcode)
++fhead = re.sub(r'#if GL_ES\s*\n\s*(#ifdef GL_FRAGMENT_PRECISION_HIGH.*?#endif|precision \w+ float;)\s*\n#endif', '', fh, flags=re.S)
++body = pre_all + '\n' + vcode + '\n' + fhead + '\n' + hd + '\n' + fcode
++body = re.sub(r'#define\s+SCREEN_RES_SCALE\s+[0-9.]+', '#define SCREEN_RES_SCALE (u_texture_size.x / 256.0)', body)
++body = re.sub(r'^\s*uniform\s+[^;]*;\s*$', '', body, flags=re.M)   # DraStic's built-ins and samplers: ours
++body = re.sub(r'^\s*precision\s+\w+\s+\w+\s*;\s*$', '', body, flags=re.M)
++body = re.sub(r'\bu_texture_size\b', 'DSF_TS', body)
++body = re.sub(r'\bu_target_size\b', 'u_output_size', body)
++body = re.sub(r'\bu_time\b', '0.0', body)
++# the framebuffer's sampler under DraStic's name
++sdefs = ''.join('#define %s u_texture\n' % n for n, i in samplers if n != 'u_texture')
++src = '''// %s: %s, as a BananaOS shader (SuperDrastic and BananaDS) for a DS screen drawn to the panel.
++// Converted by tools/shaders/conv-dfx.py from DraStic's post-FX format (.dfx + .dsd): its vertex stage computed per
++// pixel, DraStic's built-ins mapped onto u_texture, u_texture_size, u_output_size and v_texcoord.
++#ifdef GL_FRAGMENT_PRECISION_HIGH
++precision highp float;
++#else
++precision mediump float;
++#endif
++varying vec2 v_texcoord;
++uniform sampler2D u_texture;
++uniform vec2 u_texture_size;
++uniform vec2 u_output_size;
++#define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
++%s
++%s
++void main()
++{
++    dsf_vert();
++    dsf_frag();
++    gl_FragColor = SWIZ(gl_FragColor);
++}
++''' % (title, origin, sdefs, body)
++src = re.sub(r'\n{3,}', '\n\n', src)
++open(out, 'w').write(src)
+-- 
+2.56.0
+
+
+From 69059c5545ab69d44ee5bb186bebcae7fd62adb1 Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 13:06:56 +0200
+Subject: [PATCH 04/11] shaders: ds-grid-2x without per-pixel square roots
+ (same pixels, 13% less GPU time)
+
+sqrt(c*c*k) == c*sqrt(k) for c >= 0, and with an integer scale and a one-pixel line a pixel's grid coverage is 0
+or 1, so the colour is multiplied by one of two numbers per scale; they are worked out in float32 from the knobs.
+The Mali-G52 doesn't hoist uniform-only expressions, so computing them in the shader cost two square roots a pixel.
+On the RG DS Plus (BananaDS, 2x, both panels) the pass takes 9.46 ms a frame instead of 10.82; frame 3000 / 1500
+of a fixed route came out identical on the device (0 of 2.36M values per panel), and a float32 model of both gives
+identical 8-bit output at 640x480 and 1024x768 from 256x192 and 512x384 textures.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01DJdxi3HFDH2CWW9sHTDsob
+(cherry picked from commit 7ffcaa8ad84dd897df08cc9be9cb4bc9abd9e74a)
+---
+ shaders/ds-grid-2x.frag | 18 +++++++++---------
+ 1 file changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/shaders/ds-grid-2x.frag b/shaders/ds-grid-2x.frag
+index bd8c417..cef6452 100644
+--- a/shaders/ds-grid-2x.frag
++++ b/shaders/ds-grid-2x.frag
+@@ -59,11 +59,17 @@ const float GRID_COMPENSATE = 0.5;
+ 
+ void main()
+ {
+-    // Largest integer scale that fits, and the centred image rectangle it implies.
++    // Largest integer scale that fits, and the centred image rectangle it implies. (Uniforms only: the compiler
++    // can evaluate these once per draw.)
+     float s      = max(1.0, floor(min(u_output_size.x / DS_SIZE.x,
+                                       u_output_size.y / DS_SIZE.y)));
+     vec2  imgSize = DS_SIZE * s;
+     vec2  origin  = floor((u_output_size - imgSize) * 0.5);
++    // sqrt(c*c*k) == c*sqrt(k) for c >= 0, and with an integer scale and a one-pixel line a pixel's grid coverage
++    // is 0 or 1: the colour times one of two numbers per scale, worked out in float32 from the knobs above (change them and these go stale)
++    // (Mali doesn't hoist uniform-only expressions: two square roots a pixel cost as much as the rest)
++    float k1 = s >= 4.0 ? 1.0595132112503052 : s >= 2.0 ? 1.1201415061950684 : 1.1870512962341309;
++    float k0 = s >= 4.0 ? 0.78575599193573   : s >= 2.0 ? 0.8307191133499146 : 0.8803408145904541;
+ 
+     vec2 p     = floor(v_texcoord * u_output_size);   // this output pixel
+     vec2 local = p - origin;                          // position inside the image
+@@ -82,12 +88,6 @@ void main()
+     vec2 f   = local - floor(local / s) * s;          // 0 .. s-1 within the DS-pixel cell
+     vec2 ov  = max(vec2(0.0), min(f + 1.0, vec2(s)) - max(f, vec2(s - GRID_WIDTH_PX)));
+     float coverage = ov.x + ov.y - ov.x * ov.y;       // union of row and column bands
+-    float g = mix(1.0, GRID_LEVEL, coverage);
+-
+-    float meanAxis = min(GRID_WIDTH_PX / s, 1.0);
+-    float meanCov  = meanAxis + meanAxis - meanAxis * meanAxis;
+-    float bright   = mix(1.0, 1.0 / mix(1.0, GRID_LEVEL, meanCov), GRID_COMPENSATE);
+-
+-    vec3 lin = c.rgb * c.rgb * (g * bright);
+-    gl_FragColor = vec4(sqrt(min(lin, vec3(1.0))), c.a);
++    float k = mix(k1, k0, coverage);
++    gl_FragColor = vec4(min(c.rgb * k, vec3(1.0)), c.a);
+ }
+-- 
+2.56.0
+
+
+From ca8fdbad9c36c36afd48eb7bdf819f2314bd1aa1 Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Mon, 26 Oct 2026 23:28:58 +0100
+Subject: [PATCH 05/11] shaders: ds-grid's grid on the RG DS thin and even (no
+ thick bars, no 2px/3px cells)
+
+At 2.5 panel pixels per DS pixel the grid was one whole snapped pixel at 0.42 (linear) plus a
+neighbour at 0.72: about 2 of every 2.5 pixels darkened, line pixels at 0, 2, 5, 7, 10..., so
+cells alternated 2 and 3 pixels and lost different light (34% spread between cells, beat 0.66 of
+the grid's own amplitude, measured on the panel).
+
+Now each axis's darkening is GRID_DARKNESS * (1 + cos) peaking on the DS-pixel boundaries: the
+band-limited form of a thin gap. Every cell loses the same light, no period-5 beat (0.02 on the
+panel), darkest pixel 0.82 of the flat colour, the pixel pairs 0.90. GRID_CRISP > 0 mixes in a
+sharp GAP_WIDTH gap by area coverage (crisper, with a faint plaid). Whole-number scales (the RG DS
+Plus) keep the old snapped grid, pixel for pixel. ds-grid-color regenerated.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 2bb2558cf226fc5d5beb253f317680228b374357)
+(cherry picked from commit b6326cfc1d6b433bd8035937e029021c9bff025d)
+---
+ shaders/ds-grid-color.frag | 153 +++++++++++++++++++------------------
+ shaders/ds-grid.frag       | 153 +++++++++++++++++++------------------
+ 2 files changed, 158 insertions(+), 148 deletions(-)
+
+diff --git a/shaders/ds-grid-color.frag b/shaders/ds-grid-color.frag
+index 397e023..62712fe 100644
+--- a/shaders/ds-grid-color.frag
++++ b/shaders/ds-grid-color.frag
+@@ -1,6 +1,6 @@
+ // ds-grid + NDS screen colour (generated from ds-grid.frag by tools/gen-color-shaders.py: edit ds-grid.frag, then run it).
+-// ds-grid -- exact-area 2.5x reconstruction plus an LCD column/row structure, for
+-// DraStic at 1x on the Anbernic RG DS. Full screen, no letterboxing.
++// ds-grid -- exact-area 2.5x reconstruction plus a thin LCD grid, for the Anbernic RG DS (DS screens full screen,
++// no letterboxing).
+ //
+ // SCALING (identical to ds-crisp)
+ // At 1x each DS screen is its own 256x192 texture drawn to 640x480: a uniform 2.5x
+@@ -8,41 +8,31 @@
+ // Measured against the ideal on this GPU: RMSE 0.29/255, versus 12.2 for the built-in
+ // sharp-bilinear, 36.8 for bilinear, 40.6 for nearest.
+ //
+-// WHY THE GRID IS BUILT THIS WAY
+-// One DS pixel is 2.5 output pixels, so a grid line cannot be given a fractional
+-// position without changing shape from cell to cell. Computing exact sub-pixel
+-// coverage -- the obvious "correct" approach, and what the first version of this file
+-// did -- makes every second line land inside a pixel and the one after it straddle
+-// two. The energy per line is then identical, which is why it does not shimmer, but
+-// the lines visibly alternate between thin-and-dark and wide-and-soft. On a flat
+-// gradient that reads as a plaid weave, not as a screen.
++// THE GRID ON THE RG DS (a DS pixel is 2.5 panel pixels, at every internal resolution)
++// A real DS LCD shows a thin, faint gap between its pixels, every cell the same. Until 0.5.0 every line here was
++// snapped to one whole panel pixel (0.42 in linear light) plus a partly darkened neighbour (0.72): about 1.5 of
++// every 2.5 pixels dark, which read as thick bars, and the line pixels fell at 0, 2, 5, 7, 10..., cells
++// alternating 2 and 3 pixels wide (a beat every 2 DS pixels, 0.70 of the grid's own amplitude).
+ //
+-// So instead every line is snapped to exactly one output pixel. All lines are then
+-// identical by construction; what varies is the spacing, which alternates 2px, 3px,
+-// 2px, 3px (line columns fall at floor(k * 2.5) = 0, 2, 5, 7, 10, ...). Uneven
+-// spacing in a fine repeating stripe is far less visible than uneven line weight,
+-// because the eye reads the texture rather than measuring the gaps.
++// At 2.5 panel pixels per DS pixel the grid's pattern repeats every 5 pixels, and anything sharper than a pure
++// 2.5-pixel wave has harmonics that land on that 5-pixel period: a beat, seen as plaid. So by default
++// (GRID_CRISP 0) each axis's darkening is 1 + cos, peaking on the DS-pixel boundaries: the band-limited form of a
++// thin gap. On a boundary that falls on a pixel centre it darkens that one pixel, on one that falls between two
++// pixels it darkens both a little less, and the cell centres are nearly untouched; every cell loses the same
++// light and there is no beat. GRID_CRISP 1 instead takes a sharp gap GAP_WIDTH wide by area coverage (each pixel
++// darkened by the share of it the gap covers): crisper, but one dark pixel then two lighter ones alternate
++// (beat 0.14 of the grid) and that shows as a faint plaid when you look closely.
+ //
+-// Both axes carry the grid, at equal weight. An earlier revision ran columns only,
+-// reasoning that a DS panel is an RGB/BGR vertical stripe layout -- true, but at this
+-// scale it simply made the grid disappear. Rendering the shim's own lcd1x-nds-color
+-// and lcd3x and looking at them settled it: both draw a full mesh in *both* axes with
+-// clearly visible lines, and they read as a screen rather than as noise because their
+-// mask is panel-aligned on an integer period, so every cell is identical. The snapping
+-// above buys the same property here -- identical lines -- while staying locked to DS
+-// pixels rather than to the panel.
++// At a whole-number scale (the RG DS Plus at 1x: 4x) the grid stays as it was: one snapped line and its edge per
++// cell, every cell identical. Only the fractional (RG DS) case changed.
+ //
+-// Strength is limited by legibility, not taste: a snapped line is one whole output
+-// pixel, i.e. 40% of a cell, so at GRID_LEVEL_V below about 0.78 thin white text
+-// starts to break up where strokes land on a dark column.
++// Darkening is applied in linear light so it dims like a black matrix instead of crushing shadows.
++// GRID_COMPENSATE restores part of the lost light; full compensation pushes lit pixels above the source value
++// and reads as glare.
+ //
+-// Darkening is applied in linear light so it dims like a black matrix instead of
+-// crushing shadows. GRID_COMPENSATE only restores part of the lost light; full
+-// compensation pushes lit pixels above the source value and reads as glare.
+-//
+-// highp is required: mediump on this Mali-G52 is fp16 and quantises a texel
+-// coordinate near x=256 to 0.25 texels, which would scramble the line phase.
+-// No #version and no backslash continuations: the shim compiles this as ESSL 1.00.
++// highp is required: mediump on this Mali-G52 is fp16 and quantises a texel coordinate near x=256 to 0.25
++// texels, which would scramble the line phase. No #version and no backslash continuations: the shim compiles
++// this as ESSL 1.00.
+ 
+ #ifdef GL_FRAGMENT_PRECISION_HIGH
+ precision highp float;
+@@ -75,40 +65,39 @@ mediump vec3 ndsColor(mediump vec3 c)
+ // resolution, so 2x keeps its detail inside a DS-accurate grid. At 1x the two are the same.
+ const vec2 DS_SIZE = vec2(256.0, 192.0);
+ 
+-// --- taste knobs -------------------------------------------------------------
+-// Column darkness in linear light. 1.0 = off.
+-//
+-// Calibrated against the shim's own filters by screenshotting the actual panel with
+-// grim and measuring grid depth as (1 - mean of line columns / mean of the rest),
+-// which is scene-independent -- a no-grid capture measures -0.1% on it:
+-//   level 0.80 -> 10.4%    0.70 -> 16.0%    0.60 -> 22.3%    0.50 -> 28.9%
+-//   lcd3x      -> 20.0%    lcd1x-nds-color -> 24.3%
+-// Earlier versions of this file sat at 10%, half of lcd3x, which is why the grid was
+-// reported as invisible. It is not a rendering fault: these panels are ~200 PPI
+-// (81mm across 640px), so one DS pixel is 0.32mm and subtends roughly 3.6 arcmin at
+-// normal viewing distance -- near the acuity limit, where low-contrast detail simply
+-// is not resolved. The grid has to be lcd3x-class deep to register at all.
+-const float GRID_LEVEL_V    = 0.42;
+-// Row darkness. Matched to the columns so the result is a square mesh like a real
+-// LCD. Raise toward 1.0 for a column-dominant look.
+-const float GRID_LEVEL_H    = 0.42;
+-// Line thickness. A snapped line is one whole output pixel, and a cell is only 2.5,
+-// so a second full pixel would leave almost no gap. Instead the column after each
+-// line is darkened partially: 1.0 = off (1px lines), lower = thicker. Because every
+-// line gets the same two-step profile, all lines stay identical and the grid stays
+-// uniform. 0.72 reads as roughly 1.5px lines.
+-const float GRID_EDGE       = 0.72;
+-// Fraction of the removed light to restore. 1.0 reads as glare.
++// --- taste knobs: the RG DS (fractional scale) -------------------------------
++// How dark: the share of a DS pixel's light the grid takes, per axis, in linear light (0.0 = no grid). With
++// GRID_CRISP 0 the darkest panel pixel (on a boundary) keeps sqrt(1 - 2 * GRID_DARKNESS) of its colour before
++// compensation, the pixel pairs sqrt(1 - 1.31 * GRID_DARKNESS): 0.18 -> 0.80 and 0.87. Before 0.5.0 the grid
++// took 0.34 per axis.
++const float GRID_DARKNESS = 0.18;
++// 0.0 = even (the default): the band-limited form of a thin gap, a 2.5-pixel cosine, the one profile that has no
++// period-5 beat at all on this panel. 1.0 = crisp: a gap GAP_WIDTH wide by area coverage, one panel pixel darker,
++// but the lines alternate (one dark pixel, then two lighter ones) and that beat shows as a faint plaid. Between
++// the two mixes them.
++const float GRID_CRISP = 0.0;
++// The crisp gap's width in DS pixels (0.2 = half a panel pixel on the RG DS); only used with GRID_CRISP > 0.
++const float GAP_WIDTH = 0.2;
++
++// --- taste knobs: whole-number scales (the RG DS Plus), unchanged -------------
++// Calibrated in 2026-09 against the shim's own filters by screenshotting the panel and measuring grid depth as
++// (1 - mean of line columns / mean of the rest): level 0.80 -> 10.4%, 0.70 -> 16.0%, 0.60 -> 22.3%,
++// 0.50 -> 28.9%; lcd3x -> 20.0%, lcd1x-nds-color -> 24.3%.
++const float GRID_LEVEL_V    = 0.42;   // column darkness in linear light, 1.0 = off
++const float GRID_LEVEL_H    = 0.42;   // row darkness
++const float GRID_EDGE       = 0.72;   // the pixel after each line, partly darkened: 1.0 = 1px lines
++
++// Fraction of the removed light to restore (both cases). 1.0 reads as glare.
+ const float GRID_COMPENSATE = 0.5;
+ // -----------------------------------------------------------------------------
+ 
+-// 1.0 when this output pixel is the one a DS-pixel boundary snaps to.
++// 1.0 when this output pixel is the one a DS-pixel boundary snaps to (the whole-number case).
+ // Is there a DS pixel boundary inside output pixel p (per component)? The boundary k*scale lands in output pixel
+ // floor(k*scale), so p has one when the first boundary at or after p, ceil(p/scale)*scale, is below p+1. The same
+ // decision as snapping to the nearest boundary (verified identical for every pixel at scales 2.5 to 7.5, also with
+-// the division done as a reciprocal 1 ulp off either way), for all four lines at once: ~11% faster than the old
+-// per-line version. The -1e-4 keeps ceil() exact when p/scale is a whole number computed through a reciprocal
+-// (its fractions are multiples of 1/output size, far above 1e-4).
++// the division done as a reciprocal 1 ulp off either way), for all four lines at once. The -1e-4 keeps ceil()
++// exact when p/scale is a whole number computed through a reciprocal (its fractions are multiples of 1/output
++// size, far above 1e-4).
+ vec4 linesHere(vec4 p, vec4 scale)
+ {
+     vec4 c = ceil(p / scale - 1e-4);
+@@ -126,21 +115,37 @@ void main()
+     vec4 c = SWIZ(texture2D(u_texture, (i0 + 0.5 + w) / u_texture_size));
+     c.rgb = ndsColor(c.rgb);
+ 
+-    // --- snapped, uniform-weight LCD structure
+-    vec2  scale = u_output_size / DS_SIZE;          // output pixels per DS pixel (2.5 on the RG DS)
+-    vec2  invG  = DS_SIZE / u_output_size;
+     vec2  p     = floor(v_texcoord * u_output_size);
+-    vec4  L  = linesHere(vec4(p.x, p.x - 1.0, p.y, p.y - 1.0), scale.xxyy);   // line here, line one pixel back
+-    vec4  m  = mix(vec4(1.0), vec4(GRID_LEVEL_V, GRID_EDGE, GRID_LEVEL_H, GRID_EDGE), L);
+-    float gx = min(m.x, m.y);
+-    float gy = min(m.z, m.w);
+-    float g  = gx * gy;
+ 
+-    // One line and one edge column per texel, so the cell mean is exact: invS of the
+-    // columns are lines, invS are edges, the rest untouched.
+-    float meanX  = invG.x * GRID_LEVEL_V + invG.x * GRID_EDGE + (1.0 - 2.0 * invG.x);
+-    float meanY  = invG.y * GRID_LEVEL_H + invG.y * GRID_EDGE + (1.0 - 2.0 * invG.y);
+-    float meanG  = meanX * meanY;
++    vec2  scale = u_output_size / DS_SIZE;          // output pixels per DS pixel (2.5 on the RG DS)
++    vec2  invG  = DS_SIZE / u_output_size;
++    float g, meanG;
++    if (fract(scale.x) != 0.0 || fract(scale.y) != 0.0) {
++        // --- thin gap: per axis, the light a panel pixel loses is GRID_DARKNESS * (profile), whose mean over a
++        // DS pixel is 1, so every cell loses the same light. Even profile: 1 + cos, peaking on the DS-pixel
++        // boundaries (sampled at pixel centres). Crisp profile: the share of panel pixel [p, p+1] inside a gap
++        // GAP_WIDTH wide round the nearest boundary b (a pixel can't reach two gaps while GAP_WIDTH * scale + 1 < scale)
++        // (the phase reduced with fract() first: cos() of a large argument loses precision on some GPUs)
++        vec2 prof = 1.0 + cos(fract((p + 0.5) * invG) * 6.2831853);
++        if (GRID_CRISP > 0.0) {                     // (a constant: compiled out at 0)
++            vec2 hw  = 0.5 * GAP_WIDTH * scale;
++            vec2 b   = floor((p + 0.5) * invG + 0.5) * scale;
++            vec2 cov = max(min(p + 1.0, b + hw) - max(p, b - hw), 0.0) * (invG / GAP_WIDTH);
++            prof = mix(prof, cov, GRID_CRISP);
++        }
++        vec2 m    = 1.0 - GRID_DARKNESS * prof;
++        g = m.x * m.y;
++        meanG = (1.0 - GRID_DARKNESS) * (1.0 - GRID_DARKNESS);
++    } else {
++        // --- snapped, uniform-weight lines (whole-number scale)
++        vec4  L  = linesHere(vec4(p.x, p.x - 1.0, p.y, p.y - 1.0), scale.xxyy);   // line here, line one pixel back
++        vec4  m  = mix(vec4(1.0), vec4(GRID_LEVEL_V, GRID_EDGE, GRID_LEVEL_H, GRID_EDGE), L);
++        g = min(m.x, m.y) * min(m.z, m.w);
++        // one line and one edge column per texel, so the cell mean is exact
++        float meanX = invG.x * GRID_LEVEL_V + invG.x * GRID_EDGE + (1.0 - 2.0 * invG.x);
++        float meanY = invG.y * GRID_LEVEL_H + invG.y * GRID_EDGE + (1.0 - 2.0 * invG.y);
++        meanG = meanX * meanY;
++    }
+     float bright = mix(1.0, 1.0 / meanG, GRID_COMPENSATE);
+ 
+     vec3 lin = c.rgb * c.rgb * (g * bright);
+diff --git a/shaders/ds-grid.frag b/shaders/ds-grid.frag
+index 0d9cf74..dab30f4 100644
+--- a/shaders/ds-grid.frag
++++ b/shaders/ds-grid.frag
+@@ -1,5 +1,5 @@
+-// ds-grid -- exact-area 2.5x reconstruction plus an LCD column/row structure, for
+-// DraStic at 1x on the Anbernic RG DS. Full screen, no letterboxing.
++// ds-grid -- exact-area 2.5x reconstruction plus a thin LCD grid, for the Anbernic RG DS (DS screens full screen,
++// no letterboxing).
+ //
+ // SCALING (identical to ds-crisp)
+ // At 1x each DS screen is its own 256x192 texture drawn to 640x480: a uniform 2.5x
+@@ -7,41 +7,31 @@
+ // Measured against the ideal on this GPU: RMSE 0.29/255, versus 12.2 for the built-in
+ // sharp-bilinear, 36.8 for bilinear, 40.6 for nearest.
+ //
+-// WHY THE GRID IS BUILT THIS WAY
+-// One DS pixel is 2.5 output pixels, so a grid line cannot be given a fractional
+-// position without changing shape from cell to cell. Computing exact sub-pixel
+-// coverage -- the obvious "correct" approach, and what the first version of this file
+-// did -- makes every second line land inside a pixel and the one after it straddle
+-// two. The energy per line is then identical, which is why it does not shimmer, but
+-// the lines visibly alternate between thin-and-dark and wide-and-soft. On a flat
+-// gradient that reads as a plaid weave, not as a screen.
++// THE GRID ON THE RG DS (a DS pixel is 2.5 panel pixels, at every internal resolution)
++// A real DS LCD shows a thin, faint gap between its pixels, every cell the same. Until 0.5.0 every line here was
++// snapped to one whole panel pixel (0.42 in linear light) plus a partly darkened neighbour (0.72): about 1.5 of
++// every 2.5 pixels dark, which read as thick bars, and the line pixels fell at 0, 2, 5, 7, 10..., cells
++// alternating 2 and 3 pixels wide (a beat every 2 DS pixels, 0.70 of the grid's own amplitude).
+ //
+-// So instead every line is snapped to exactly one output pixel. All lines are then
+-// identical by construction; what varies is the spacing, which alternates 2px, 3px,
+-// 2px, 3px (line columns fall at floor(k * 2.5) = 0, 2, 5, 7, 10, ...). Uneven
+-// spacing in a fine repeating stripe is far less visible than uneven line weight,
+-// because the eye reads the texture rather than measuring the gaps.
++// At 2.5 panel pixels per DS pixel the grid's pattern repeats every 5 pixels, and anything sharper than a pure
++// 2.5-pixel wave has harmonics that land on that 5-pixel period: a beat, seen as plaid. So by default
++// (GRID_CRISP 0) each axis's darkening is 1 + cos, peaking on the DS-pixel boundaries: the band-limited form of a
++// thin gap. On a boundary that falls on a pixel centre it darkens that one pixel, on one that falls between two
++// pixels it darkens both a little less, and the cell centres are nearly untouched; every cell loses the same
++// light and there is no beat. GRID_CRISP 1 instead takes a sharp gap GAP_WIDTH wide by area coverage (each pixel
++// darkened by the share of it the gap covers): crisper, but one dark pixel then two lighter ones alternate
++// (beat 0.14 of the grid) and that shows as a faint plaid when you look closely.
+ //
+-// Both axes carry the grid, at equal weight. An earlier revision ran columns only,
+-// reasoning that a DS panel is an RGB/BGR vertical stripe layout -- true, but at this
+-// scale it simply made the grid disappear. Rendering the shim's own lcd1x-nds-color
+-// and lcd3x and looking at them settled it: both draw a full mesh in *both* axes with
+-// clearly visible lines, and they read as a screen rather than as noise because their
+-// mask is panel-aligned on an integer period, so every cell is identical. The snapping
+-// above buys the same property here -- identical lines -- while staying locked to DS
+-// pixels rather than to the panel.
++// At a whole-number scale (the RG DS Plus at 1x: 4x) the grid stays as it was: one snapped line and its edge per
++// cell, every cell identical. Only the fractional (RG DS) case changed.
+ //
+-// Strength is limited by legibility, not taste: a snapped line is one whole output
+-// pixel, i.e. 40% of a cell, so at GRID_LEVEL_V below about 0.78 thin white text
+-// starts to break up where strokes land on a dark column.
++// Darkening is applied in linear light so it dims like a black matrix instead of crushing shadows.
++// GRID_COMPENSATE restores part of the lost light; full compensation pushes lit pixels above the source value
++// and reads as glare.
+ //
+-// Darkening is applied in linear light so it dims like a black matrix instead of
+-// crushing shadows. GRID_COMPENSATE only restores part of the lost light; full
+-// compensation pushes lit pixels above the source value and reads as glare.
+-//
+-// highp is required: mediump on this Mali-G52 is fp16 and quantises a texel
+-// coordinate near x=256 to 0.25 texels, which would scramble the line phase.
+-// No #version and no backslash continuations: the shim compiles this as ESSL 1.00.
++// highp is required: mediump on this Mali-G52 is fp16 and quantises a texel coordinate near x=256 to 0.25
++// texels, which would scramble the line phase. No #version and no backslash continuations: the shim compiles
++// this as ESSL 1.00.
+ 
+ #ifdef GL_FRAGMENT_PRECISION_HIGH
+ precision highp float;
+@@ -59,40 +49,39 @@ uniform vec2 u_output_size;
+ // resolution, so 2x keeps its detail inside a DS-accurate grid. At 1x the two are the same.
+ const vec2 DS_SIZE = vec2(256.0, 192.0);
+ 
+-// --- taste knobs -------------------------------------------------------------
+-// Column darkness in linear light. 1.0 = off.
+-//
+-// Calibrated against the shim's own filters by screenshotting the actual panel with
+-// grim and measuring grid depth as (1 - mean of line columns / mean of the rest),
+-// which is scene-independent -- a no-grid capture measures -0.1% on it:
+-//   level 0.80 -> 10.4%    0.70 -> 16.0%    0.60 -> 22.3%    0.50 -> 28.9%
+-//   lcd3x      -> 20.0%    lcd1x-nds-color -> 24.3%
+-// Earlier versions of this file sat at 10%, half of lcd3x, which is why the grid was
+-// reported as invisible. It is not a rendering fault: these panels are ~200 PPI
+-// (81mm across 640px), so one DS pixel is 0.32mm and subtends roughly 3.6 arcmin at
+-// normal viewing distance -- near the acuity limit, where low-contrast detail simply
+-// is not resolved. The grid has to be lcd3x-class deep to register at all.
+-const float GRID_LEVEL_V    = 0.42;
+-// Row darkness. Matched to the columns so the result is a square mesh like a real
+-// LCD. Raise toward 1.0 for a column-dominant look.
+-const float GRID_LEVEL_H    = 0.42;
+-// Line thickness. A snapped line is one whole output pixel, and a cell is only 2.5,
+-// so a second full pixel would leave almost no gap. Instead the column after each
+-// line is darkened partially: 1.0 = off (1px lines), lower = thicker. Because every
+-// line gets the same two-step profile, all lines stay identical and the grid stays
+-// uniform. 0.72 reads as roughly 1.5px lines.
+-const float GRID_EDGE       = 0.72;
+-// Fraction of the removed light to restore. 1.0 reads as glare.
++// --- taste knobs: the RG DS (fractional scale) -------------------------------
++// How dark: the share of a DS pixel's light the grid takes, per axis, in linear light (0.0 = no grid). With
++// GRID_CRISP 0 the darkest panel pixel (on a boundary) keeps sqrt(1 - 2 * GRID_DARKNESS) of its colour before
++// compensation, the pixel pairs sqrt(1 - 1.31 * GRID_DARKNESS): 0.18 -> 0.80 and 0.87. Before 0.5.0 the grid
++// took 0.34 per axis.
++const float GRID_DARKNESS = 0.18;
++// 0.0 = even (the default): the band-limited form of a thin gap, a 2.5-pixel cosine, the one profile that has no
++// period-5 beat at all on this panel. 1.0 = crisp: a gap GAP_WIDTH wide by area coverage, one panel pixel darker,
++// but the lines alternate (one dark pixel, then two lighter ones) and that beat shows as a faint plaid. Between
++// the two mixes them.
++const float GRID_CRISP = 0.0;
++// The crisp gap's width in DS pixels (0.2 = half a panel pixel on the RG DS); only used with GRID_CRISP > 0.
++const float GAP_WIDTH = 0.2;
++
++// --- taste knobs: whole-number scales (the RG DS Plus), unchanged -------------
++// Calibrated in 2026-09 against the shim's own filters by screenshotting the panel and measuring grid depth as
++// (1 - mean of line columns / mean of the rest): level 0.80 -> 10.4%, 0.70 -> 16.0%, 0.60 -> 22.3%,
++// 0.50 -> 28.9%; lcd3x -> 20.0%, lcd1x-nds-color -> 24.3%.
++const float GRID_LEVEL_V    = 0.42;   // column darkness in linear light, 1.0 = off
++const float GRID_LEVEL_H    = 0.42;   // row darkness
++const float GRID_EDGE       = 0.72;   // the pixel after each line, partly darkened: 1.0 = 1px lines
++
++// Fraction of the removed light to restore (both cases). 1.0 reads as glare.
+ const float GRID_COMPENSATE = 0.5;
+ // -----------------------------------------------------------------------------
+ 
+-// 1.0 when this output pixel is the one a DS-pixel boundary snaps to.
++// 1.0 when this output pixel is the one a DS-pixel boundary snaps to (the whole-number case).
+ // Is there a DS pixel boundary inside output pixel p (per component)? The boundary k*scale lands in output pixel
+ // floor(k*scale), so p has one when the first boundary at or after p, ceil(p/scale)*scale, is below p+1. The same
+ // decision as snapping to the nearest boundary (verified identical for every pixel at scales 2.5 to 7.5, also with
+-// the division done as a reciprocal 1 ulp off either way), for all four lines at once: ~11% faster than the old
+-// per-line version. The -1e-4 keeps ceil() exact when p/scale is a whole number computed through a reciprocal
+-// (its fractions are multiples of 1/output size, far above 1e-4).
++// the division done as a reciprocal 1 ulp off either way), for all four lines at once. The -1e-4 keeps ceil()
++// exact when p/scale is a whole number computed through a reciprocal (its fractions are multiples of 1/output
++// size, far above 1e-4).
+ vec4 linesHere(vec4 p, vec4 scale)
+ {
+     vec4 c = ceil(p / scale - 1e-4);
+@@ -109,21 +98,37 @@ void main()
+     vec2 w = clamp(((lo + invS) - (i0 + 1.0)) / invS, 0.0, 1.0);
+     vec4 c = SWIZ(texture2D(u_texture, (i0 + 0.5 + w) / u_texture_size));
+ 
+-    // --- snapped, uniform-weight LCD structure
+-    vec2  scale = u_output_size / DS_SIZE;          // output pixels per DS pixel (2.5 on the RG DS)
+-    vec2  invG  = DS_SIZE / u_output_size;
+     vec2  p     = floor(v_texcoord * u_output_size);
+-    vec4  L  = linesHere(vec4(p.x, p.x - 1.0, p.y, p.y - 1.0), scale.xxyy);   // line here, line one pixel back
+-    vec4  m  = mix(vec4(1.0), vec4(GRID_LEVEL_V, GRID_EDGE, GRID_LEVEL_H, GRID_EDGE), L);
+-    float gx = min(m.x, m.y);
+-    float gy = min(m.z, m.w);
+-    float g  = gx * gy;
+ 
+-    // One line and one edge column per texel, so the cell mean is exact: invS of the
+-    // columns are lines, invS are edges, the rest untouched.
+-    float meanX  = invG.x * GRID_LEVEL_V + invG.x * GRID_EDGE + (1.0 - 2.0 * invG.x);
+-    float meanY  = invG.y * GRID_LEVEL_H + invG.y * GRID_EDGE + (1.0 - 2.0 * invG.y);
+-    float meanG  = meanX * meanY;
++    vec2  scale = u_output_size / DS_SIZE;          // output pixels per DS pixel (2.5 on the RG DS)
++    vec2  invG  = DS_SIZE / u_output_size;
++    float g, meanG;
++    if (fract(scale.x) != 0.0 || fract(scale.y) != 0.0) {
++        // --- thin gap: per axis, the light a panel pixel loses is GRID_DARKNESS * (profile), whose mean over a
++        // DS pixel is 1, so every cell loses the same light. Even profile: 1 + cos, peaking on the DS-pixel
++        // boundaries (sampled at pixel centres). Crisp profile: the share of panel pixel [p, p+1] inside a gap
++        // GAP_WIDTH wide round the nearest boundary b (a pixel can't reach two gaps while GAP_WIDTH * scale + 1 < scale)
++        // (the phase reduced with fract() first: cos() of a large argument loses precision on some GPUs)
++        vec2 prof = 1.0 + cos(fract((p + 0.5) * invG) * 6.2831853);
++        if (GRID_CRISP > 0.0) {                     // (a constant: compiled out at 0)
++            vec2 hw  = 0.5 * GAP_WIDTH * scale;
++            vec2 b   = floor((p + 0.5) * invG + 0.5) * scale;
++            vec2 cov = max(min(p + 1.0, b + hw) - max(p, b - hw), 0.0) * (invG / GAP_WIDTH);
++            prof = mix(prof, cov, GRID_CRISP);
++        }
++        vec2 m    = 1.0 - GRID_DARKNESS * prof;
++        g = m.x * m.y;
++        meanG = (1.0 - GRID_DARKNESS) * (1.0 - GRID_DARKNESS);
++    } else {
++        // --- snapped, uniform-weight lines (whole-number scale)
++        vec4  L  = linesHere(vec4(p.x, p.x - 1.0, p.y, p.y - 1.0), scale.xxyy);   // line here, line one pixel back
++        vec4  m  = mix(vec4(1.0), vec4(GRID_LEVEL_V, GRID_EDGE, GRID_LEVEL_H, GRID_EDGE), L);
++        g = min(m.x, m.y) * min(m.z, m.w);
++        // one line and one edge column per texel, so the cell mean is exact
++        float meanX = invG.x * GRID_LEVEL_V + invG.x * GRID_EDGE + (1.0 - 2.0 * invG.x);
++        float meanY = invG.y * GRID_LEVEL_H + invG.y * GRID_EDGE + (1.0 - 2.0 * invG.y);
++        meanG = meanX * meanY;
++    }
+     float bright = mix(1.0, 1.0 / meanG, GRID_COMPENSATE);
+ 
+     vec3 lin = c.rgb * c.rgb * (g * bright);
+-- 
+2.56.0
+
+
+From 5a58317230e04de4092a196c3eb64dfab72972e4 Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 04:14:13 +0200
+Subject: [PATCH 06/11] Display-locked sound at the rate DraStic makes it when
+ the frame queue paces it (DSFLIP_AUDIO_LOCK_PER)
+
+With the frame queue pacing DraStic at the panels' refresh (BananaOS), it makes 44100 samples a second there, not
+44100 * refresh / 59.8261 as DSFLIP_AUDIO_LOCK assumed: the stream was drained 127 Hz faster than it was made, and
+the run-out counter from 0.5.0-beta.1-rocknixds.10 showed DraStic's callback zero-filling 40-66 chunks every 10 s
+in a Mario Kart DS race on an RG DS Plus (~1250 frames of zeros: clicks). DSFLIP_AUDIO_LOCK_PER=60 takes the
+display's rate over 60 instead: 0 run-outs, 0 underruns, the trim within 200 ppm, no more repeated frames than
+before. Unset keeps the DS's rate, for setups where DraStic's own audio pacing sets its speed.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_014S3ZdYiQwsyHwLwabtGfBK
+(cherry picked from commit 5d230cd8db27d6b67fc0f51dff85471af15d5663)
+---
+ src/audio.c | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/src/audio.c b/src/audio.c
+index ee8e63b..e81178f 100644
+--- a/src/audio.c
++++ b/src/audio.c
+@@ -368,12 +368,19 @@ static int resample(const int16_t *x, int nin, int ch, int16_t *out, int *np) {
+  * "repeat": 0.13-0.24 a second in HeartGold, walking; seen as a hitch when the picture scrolls). Here the stream is
+  * taken for what it must be for refresh-rate frames, 44100 * refresh / 59.8261 Hz, and resampled from that to the
+  * device's rate: the writer then drains the ring that much faster, the pump's rate trim follows it, and DraStic runs
+- * 0.3% fast (pitch +5 cents). A fixed ratio: as exact as the refresh rate given (the log's [pace] period). */
++ * 0.3% fast (pitch +5 cents). A fixed ratio: as exact as the refresh rate given (the log's [pace] period).
++ * But where the presenter's frame queue paces DraStic (BananaOS: latch pacing, 2-frame queue), it already runs at the
++ * refresh rate and makes 44100 samples a second there, a 60th of that per frame, not 44100 * refresh / 59.8261: taken
++ * at that, the stream was drained 127 Hz faster than DraStic made it, and its callback filled the missing end of 40-66
++ * chunks every 10 s with zeros (Mario Kart DS racing on an RG DS Plus: clicks; 0 with 44100 * refresh / 60, and still
++ * no repeated frames). DSFLIP_AUDIO_LOCK_PER=60 (BananaOS) takes it that way; unset: the DS's rate, as above. */
+ #define DS_FPS 59.8260982880808
+ static int alsa_open(void) {
+     const char *l = getenv("DSFLIP_ALSA_LATENCY"), *r = getenv("DSFLIP_AUDIO_DEVICE_RATE"), *k = getenv("DSFLIP_AUDIO_LOCK");
+     double hz = k ? strtod(k, 0) : 0;
+-    lock_in = hz > 50 && hz < 70 ? freq * hz / DS_FPS : 0;
++    const char *per = getenv("DSFLIP_AUDIO_LOCK_PER");
++    double per_fps = per && strtod(per, 0) > 50 && strtod(per, 0) < 70 ? strtod(per, 0) : DS_FPS;
++    lock_in = hz > 50 && hz < 70 ? freq * hz / per_fps : 0;
+     out_rate = r ? atoi(r) : 0;
+     if (out_rate < 8000 || out_rate > 192000) out_rate = lock_in ? freq : 0;
+     if (out_rate == freq && !lock_in) out_rate = 0;
+-- 
+2.56.0
+
+
+From 9c8ce3b691009f842e1ddde714946c4ee264be84 Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 00:37:20 +0200
+Subject: [PATCH 07/11] DraStic's save and load state buttons: a pop-up once
+ the state is written ("Saved to slot n") or read ("Loaded slot n"), as the
+ menu's own
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 2d04425a4cb96ecd4c69cb77d48cc1dd5f71af4e)
+---
+ src/menu.c   |  2 ++
+ src/resume.c | 47 ++++++++++++++++++++++++++++++++++++++++++-----
+ 2 files changed, 44 insertions(+), 5 deletions(-)
+
+diff --git a/src/menu.c b/src/menu.c
+index 611b12d..66bed23 100644
+--- a/src/menu.c
++++ b/src/menu.c
+@@ -359,6 +359,8 @@ static void game_info_once(void) { pthread_once(&gi_once, game_info); }
+ /* the game's name as DraStic names its files (audio.c: the fake microphone's sample) */
+ const char *menu_game_base(void) { game_info_once(); return gbase; }
+ static void slot_path(int n, char *out, size_t sz) { snprintf(out, sz, "%s/%s_%d.dss", sdir, gbase, n); }
++/* the game's name, for resume.c's pop-ups (DraStic's save / load state buttons) */
++const char *menu_game_title(void) { if (!gbase[0]) game_info(); return gtitle; }
+ 
+ /* zlib, as ra.c loads it */
+ typedef struct {
+diff --git a/src/resume.c b/src/resume.c
+index 1e3ae29..dab5657 100644
+--- a/src/resume.c
++++ b/src/resume.c
+@@ -57,6 +57,22 @@ void resume_press(int b);
+ static void menu_jobs(void);
+ static long long load_at_frame, loaded_frame;
+ static long long frames;
++/* DraStic's own save / load state buttons (the hotkeys, not the menu's): a pop-up once the state is written or read */
++static long long hk_load_at = -1000, hk_load_seen;
++static volatile int hk_load_slot = -1;
++const char *menu_game_title(void);                    /* menu.c: the game's name, as ES shows it */
++int resume_menu_busy(void);
++static int is_slot(const char *p);
++static int slot_digit(const char *p) { size_t n = strlen(p); return p[n - 5] - '0'; }
++static void hotkey_toast(const char *what, int digit) {
++    char m[64]; snprintf(m, sizeof m, what, digit + 1);   /* (DraStic's slot 0 is the menu's slot 1) */
++    dsflip_toast(m, menu_game_title(), 0x3aa0ff, 2500);
++}
++/* a slot file DraStic opened for reading, while a press of its load state button is fresh */
++static void hotkey_load_seen(const char *p, int reading) {
++    if (!reading || m_loading || loading || !is_slot(p) || frames - hk_load_at > 300) return;
++    if (hk_load_slot < 0) { hk_load_slot = slot_digit(p); hk_load_seen = frames; }
++}
+ 
+ static long long now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000LL + t.tv_nsec / 1000000; }
+ 
+@@ -107,7 +123,9 @@ int rename(const char *a, const char *b) {
+         saved = r ? -1 : 1;
+         return r;
+     }
+-    return real(a, b);
++    int r = real(a, b);
++    if (!r && is_slot(b)) { dsflip_log("[resume] savestate hotkey: %s\n", b); hotkey_toast("Saved to slot %d", slot_digit(b)); }
++    return r;
+ }
+ /* DraStic deletes the slot's old file before renaming the new one in: not while the save goes to the resume file */
+ int unlink(const char *p) {
+@@ -120,17 +138,31 @@ int remove(const char *p) {
+     if ((saving || m_saving) && is_slot(p)) { if (trace) dsflip_log("[resume] kept %s (DraStic deletes it before saving)\n", p); return 0; }
+     return real(p);
+ }
+-FILE *fopen(const char *p, const char *m) { NEXT(FILE *, "fopen", const char *, const char *); return real(redirect_load(p, "fopen"), m); }
+-FILE *fopen64(const char *p, const char *m) { NEXT(FILE *, "fopen64", const char *, const char *); return real(redirect_load(p, "fopen64"), m); }
++FILE *fopen(const char *p, const char *m) {
++    NEXT(FILE *, "fopen", const char *, const char *);
++    FILE *r = real(redirect_load(p, "fopen"), m);
++    if (r) hotkey_load_seen(p, m && m[0] == 'r' && !strchr(m, '+'));
++    return r;
++}
++FILE *fopen64(const char *p, const char *m) {
++    NEXT(FILE *, "fopen64", const char *, const char *);
++    FILE *r = real(redirect_load(p, "fopen64"), m);
++    if (r) hotkey_load_seen(p, m && m[0] == 'r' && !strchr(m, '+'));
++    return r;
++}
+ int open(const char *p, int f, ...) {
+     NEXT(int, "open", const char *, int, ...);
+     mode_t md = 0; if (f & O_CREAT) { va_list ap; va_start(ap, f); md = va_arg(ap, int); va_end(ap); }
+-    return real(redirect_load(p, "open"), f, md);
++    int r = real(redirect_load(p, "open"), f, md);
++    if (r >= 0) hotkey_load_seen(p, (f & O_ACCMODE) == O_RDONLY);
++    return r;
+ }
+ int open64(const char *p, int f, ...) {
+     NEXT(int, "open64", const char *, int, ...);
+     mode_t md = 0; if (f & O_CREAT) { va_list ap; va_start(ap, f); md = va_arg(ap, int); va_end(ap); }
+-    return real(redirect_load(p, "open64"), f, md);
++    int r = real(redirect_load(p, "open64"), f, md);
++    if (r >= 0) hotkey_load_seen(p, (f & O_ACCMODE) == O_RDONLY);
++    return r;
+ }
+ int access(const char *p, int m) { NEXT(int, "access", const char *, int); return real(redirect_load(p, "access"), m); }
+ int __xstat(int v, const char *p, struct stat *s) { NEXT(int, "__xstat", int, const char *, struct stat *); return real(v, redirect_load(p, "stat"), s); }
+@@ -206,6 +238,7 @@ void resume_saw_event(const void *ev) {
+     if (type != 0x603 && type != 0x604) return;          /* SDL_JOYBUTTONDOWN / UP */
+     int b = e[12], down = type == 0x603;
+     if (down && (b == btn_save || b == btn_load)) cpugov_boost(3000);
++    if (down && b == btn_load && !resume_menu_busy()) { hk_load_at = frames; hk_load_slot = -1; }   /* (a pop-up once it's read) */
+     if (b < 64) { if (down) held_btns |= 1ULL << b; else held_btns &= ~(1ULL << b); }
+     #define HELD(x) ((x) >= 0 && (held_btns >> (x) & 1))
+     int combo = exit_combo && HELD(btn_start) && (HELD(btn_select) || HELD(btn_menu));
+@@ -258,6 +291,10 @@ int resume_saving(void) { return saving; }              /* dsflip.c's stall watc
+ void resume_frame(void) {
+     frames++;
+     menu_jobs();
++    if (hk_load_slot >= 0 && frames - hk_load_seen >= 20) {   /* read in (the menu's own loads wait as long) */
++        dsflip_log("[resume] load state hotkey: slot file %d\n", hk_load_slot);
++        hotkey_toast("Loaded slot %d", hk_load_slot); hk_load_slot = -1; hk_load_at = -1000;
++    }
+     if (combo_since && now_ms() - combo_since >= EXIT_HOLD_MS) {
+         combo_since = 0; held_btns = 0;
+         dsflip_log("[resume] exit combo held: quitting\n");
+-- 
+2.56.0
+
+
+From e64ed05fe7135dd205ac159c26deb9c805d8c22e Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Sat, 24 Oct 2026 22:59:42 +0200
+Subject: [PATCH 08/11] In-game menu: a charger plugged in shows as charging
+ (the rk817's gauge can say Discharging then, #35)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit 321e8cd94d435e13489c85498a0ff4e695c9af6b)
+---
+ src/dsflip.c | 10 ++++++++++
+ 1 file changed, 10 insertions(+)
+
+diff --git a/src/dsflip.c b/src/dsflip.c
+index 56647bf..a763f52 100644
+--- a/src/dsflip.c
++++ b/src/dsflip.c
+@@ -555,6 +555,16 @@ static int battery_pct(int *charging) {
+             snprintf(p, sizeof p, "%.*sstatus", (int)n, g.gl_pathv[i]);
+             if ((f = fopen(p, "r"))) { char st[32] = ""; if (fgets(st, sizeof st, f)) *charging = !strncmp(st, "Charging", 8) || !strncmp(st, "Full", 4); fclose(f); }
+         }
++        /* a charger plugged in counts as charging, as in BananaOS's menu: the rk817's gauge can say "Discharging" while
++         * it charges (the menu's "+" was missing then, #35) */
++        for (size_t i = 0; i < g.gl_pathc && !*charging; i++) {
++            char t[32] = "", p[300]; FILE *f = fopen(g.gl_pathv[i], "r");
++            if (f) { if (!fgets(t, sizeof t, f)) t[0] = 0; fclose(f); }
++            if (strncmp(t, "USB", 3) && strncmp(t, "Mains", 5)) continue;
++            size_t n = strlen(g.gl_pathv[i]) - 4;
++            snprintf(p, sizeof p, "%.*sonline", (int)n, g.gl_pathv[i]);
++            if ((f = fopen(p, "r"))) { int on = 0; if (fscanf(f, "%d", &on) == 1 && on) *charging = 1; fclose(f); }
++        }
+         globfree(&g);
+     }
+     return pct;
+-- 
+2.56.0
+
+
+From e3bb991cb76700edfddd7efaa2fae56902f4881a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 12 Oct 2026 17:12:39 +0000
+Subject: [PATCH 09/11] superdrastic-run: a TERM stops DraStic when it runs
+ without SuperDrastic too
+
+With no "ready" verdict (in BananaLinux's QEMU boot test, say) the runner
+exec'd plain DraStic, whose SDL turns a TERM into a quit event DraStic
+ignores: a shutdown or the frontend ending the game waited forever. DraStic
+now runs in the background there as well, with the same stop trap.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016NcGDNSjDTqMmWCvL5Jnhk
+(cherry picked from commit ebae0d13168bcf7196bc9b76c4e56deefd08d6c9)
+---
+ runner/superdrastic-run | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/runner/superdrastic-run b/runner/superdrastic-run
+index 77c5ac0..39737d0 100755
+--- a/runner/superdrastic-run
++++ b/runner/superdrastic-run
+@@ -143,7 +143,11 @@ if [ "$v" != ready ]; then
+     trap - TERM INT HUP
+     [ "${DSFLIP_FALLBACK:-1}" = 0 ] && exit 1
+     say "running DraStic without SuperDrastic"
+-    plain "$@"
++    # not exec'd: DraStic's SDL turns a TERM into a quit event that DraStic ignores, so a stop (a shutdown, the
++    # frontend ending the game) has to kill it, as above
++    ( cd "$WORKDIR" && exec "$DRASTIC" "$@" ) &
++    P=$!
++    trap stop_game TERM INT HUP
+ fi
+ wait $P; rc=$?
+ cpu_back                       # at once: SuperDrastic's governor may have lowered the limit
+-- 
+2.56.0
+
+
+From b22d2911ef492ea27cc03dd2f8cf50ebf7158c8a Mon Sep 17 00:00:00 2001
+From: Anthony Giacalone <anthony.giacalone@csulb.edu>
+Date: Sun, 1 Nov 2026 10:41:33 -0800
+Subject: [PATCH 10/11] 0.5.0-beta.1-rocknixds.11: BananaOS line fixes for
+ ROCKNIXDS (phase 1)
+
+rocknixds.10 (d8f4105) plus, cherry-picked from the BananaOS line (-x):
+the long white screen after a sleep (#64), 21 more shaders, ds-grid-2x
+13% cheaper and ds-grid even on the RG DS, the opt-in display-locked
+sound rate (DSFLIP_AUDIO_LOCK_PER), save/load state pop-ups, a charger
+shown as charging in the menu (#35), and a TERM that stops DraStic
+without SuperDrastic too.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LMsLD8jTdPsU6UcXHj7s2H
+---
+ VERSION | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/VERSION b/VERSION
+index 376ccf8..2c614ff 100644
+--- a/VERSION
++++ b/VERSION
+@@ -1 +1 @@
+-0.5.0-beta.1-rocknixds.10
++0.5.0-beta.1-rocknixds.11
+-- 
+2.56.0
+
+
+From b9826c4d7be0c46b762eb19239992cd55828cf72 Mon Sep 17 00:00:00 2001
+From: Anthony Giacalone <anthony.giacalone@csulb.edu>
+Date: Sun, 1 Nov 2026 11:12:10 -0800
+Subject: [PATCH 11/11] Shaders: libretro's #pragma parameter lines compile on
+ the Mali blob
+
+Seven of the libretro shaders added on the BananaOS line (bevel, lcd1x,
+lcd1x-nds, retro-v2, sharp-bilinear-scanlines, zfast-crt, zfast-lcd)
+failed on ROCKNIX: its Mali driver (libmali g29p1) refuses the quotes in
+'#pragma parameter NAME "Label" ...' with L0001 Unknown character,
+where Mesa lets the pragma go. The loader now turns those lines into
+comments in place ('#p' -> '//', same length and lines). The converted
+shaders set their parameters to the defaults, so nothing is lost.
+
+Checked on an RG DS Plus with tools/shtest: all 29 shaders compile and
+draw at 256x192 and 512x384 into 1024x768 (was 22 of 29).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LMsLD8jTdPsU6UcXHj7s2H
+---
+ src/shader.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/shader.c b/src/shader.c
+index ee8f787..4f8114d 100644
+--- a/src/shader.c
++++ b/src/shader.c
+@@ -313,6 +313,14 @@ static int compile_named(const char *name, GLuint *out, shlines *L) {
+         fs = slurp(path, &n); from = path;
+     }
+     if (!fs) { SLOG("[shader] unknown shader \"%s\" (not built into libdrastouch, no %s.frag in the shader folders)\n", name, name); return 0; }
++    /* libretro's "#pragma parameter NAME "Label" ..." lines: the Mali blob (ROCKNIX's libmali, g29p1) refuses the
++     * quotes in them ("L0001: Unknown character '"'"), where Mesa lets an unknown pragma go. They only describe the
++     * parameters, which the converted shaders set to their defaults, so each is turned into a comment in place
++     * ("#p" -> "//"): the same length and lines, so the compiler's line numbers still match the file. */
++    for (char *p = fs; (p = strstr(p, "#pragma parameter")); p += 2) {
++        const char *b = p; while (b > fs && (b[-1] == ' ' || b[-1] == '\t')) b--;
++        if (b == fs || b[-1] == '\n') { p[0] = '/'; p[1] = '/'; }
++    }
+     { const char *m = strstr(fs, "dsflip-viewport:"); char word[16];
+       if (m && sscanf(m + 16, "%d %d %d %d", &L->vp[0], &L->vp[1], &L->vp[2], &L->vp[3]) == 4)
+           SLOG("[shader] draws the DS screen at %d,%d %dx%d of the panel (touch follows)\n", L->vp[0], L->vp[1], L->vp[2], L->vp[3]);
+-- 
+2.56.0
+

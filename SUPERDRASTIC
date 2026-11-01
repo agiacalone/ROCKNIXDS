@@ -40,4 +40,17 @@
 # the CPU governor tried 1104 MHz again; the hold now lets DraStic go while its sound still covers its next frame, and
 # a step down that runs the sound out or drops a frame is undone for the session. Built with build.sh on a Debian trixie arm64
 # sysroot (needs glibc 2.38, like .9-test.6) and package.sh.
-0.5.0-beta.1-rocknixds.10 29c146a7d313cdf7361ba8ec47b015054f7ff9ddb9c17cb7675c357d15bcb60d
+# 0.5.0-beta.1-rocknixds.11 (ROCKNIXDS 1.6.4.3-plus, the agiacalone fork, 2026-11-01): .10 (d8f4105) plus fixes
+# cherry-picked from the BananaOS line of SuperDrastic (git cherry-pick -x; the BananaOS line is upstream's
+# 68eae50, which split from ours at 930c4c5): DraStic's clock with a gap over a second taken out (the long white
+# screen after a sleep, BananaLinux #64), 21 more shaders (libretro, Anbernic, NNDDSS), ds-grid-2x 13% cheaper and
+# ds-grid even on the RG DS, an opt-in display-locked sound rate (DSFLIP_AUDIO_LOCK_PER), save/load state pop-ups,
+# a charger shown as charging (#35), and a TERM that stops DraStic without SuperDrastic too. One fork fix on top:
+# libretro's "#pragma parameter" lines are commented out before compiling, because ROCKNIX's Mali driver refuses
+# their quotes (7 of the 21 shaders failed without it). Source: dsflip/superdrastic-0.5.0-beta.1-rocknixds.11.patch
+# (git format-patch d8f4105..b9826c4, 11 commits). Built with build.sh and package.sh in a Debian trixie container:
+# clang/lld 22.1.8 (apt.llvm.org) with -fstack-protector-strong through a target config file, as Ubuntu's clang
+# does by default; a rebuild of .10 there matches the shipped .10 except the compiler's name strings. Checked on an
+# RG DS Plus: tools/smoke.sh (Mario Kart DS, HeartGold: 60.0 presents/s, 0 dropped, 0 underruns), all 29 shaders
+# through tools/shtest at 1x and 2x, and a 5 s SIGSTOP logged and taken out by the clock fix.
+0.5.0-beta.1-rocknixds.11 914177866aaea92a6c44a851afa942bfa5f01f7cd1c70e62a52dc1ac143847f6
