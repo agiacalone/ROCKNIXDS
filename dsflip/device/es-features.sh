@@ -27,6 +27,29 @@
 SYS=${ESF_SYSTEM:-/usr/config/emulationstation/es_features.cfg}
 ESF=${ESF_USER:-/storage/.config/emulationstation/es_features.cfg}
 STATE=${ESF_STATE:-/storage/rgds-rocknix-backup}     # the installer's backup dir: .esf-created, .esf-system-md5
+# SuperDrastic's other shaders (rocknixds.11 on: libretro's, DraStic's and Anbernic NNDDSS's, converted by the BananaOS
+# line), as "value|label". ES passes the value as DSHOOK_SHADER and SuperDrastic loads <value>.frag from DraStic's
+# shader folder. sharp-bilinear and lcd3x are left out: ROCKNIX's choices of those names already run (its built-in
+# copies, which SuperDrastic reads first). Only these values are stripped, and only inside drastic-sa's shader option.
+MORE_SHADERS='bevel|bevel (raised pixels)
+fxaa|fxaa (anti-aliasing)
+lcd1x|lcd1x (LCD grid)
+lcd1x-nds|lcd1x-nds (LCD grid + DS color)
+nds-color|nds-color (DS screen color)
+retro-v2|retro-v2 (pixel grid)
+sharp-bilinear-scanlines|sharp-bilinear + scanlines
+zfast-crt|zfast-crt (CRT)
+zfast-lcd|zfast-lcd (LCD grid)
+drastic-lcd1x|DraStic lcd1x
+drastic-lcd1x-nds-color|DraStic lcd1x + NDS color
+drastic-quilez|DraStic quilez
+drastic-sharp-bilinear|DraStic sharp-bilinear
+drastic-sharp-bilinear-nds-color|DraStic sharp-bilinear + NDS color
+drastic-zfast-lcd|DraStic zfast-lcd
+drastic-zfast-lcd-nds-color|DraStic zfast-lcd + NDS color
+nnddss-dot-mizai|NNDDSS Dot MiZai
+nnddss-dot-mizai-rgds|NNDDSS Dot MiZai (RG DS+)
+nnddss-retro-tiles|NNDDSS retro tiles'
 
 # Drop ROCKNIXDS's shader choices and options, as the RG DS line does. Its 1.5.5 wrote "3D renderer" and "3D texture
 # filter" before "share performance logs" (an RG DS option) was closed. CustomFeatures::loadCustomFeatures only keeps
@@ -39,7 +62,13 @@ STATE=${ESF_STATE:-/storage/rgds-rocknix-backup}     # the installer's backup di
 # a one-line option of ROCKNIX's stays, and a one-line copy of ours goes on its own.
 # </features> is the wrapper, not a feature. Reads stdin.
 strip_ours() {
-    grep -vE 'value="ds-(crisp|grid|grid-2x|crisp-color|grid-color|fsr|integer)"' | awk '
+    grep -vE 'value="ds-(crisp|grid|grid-2x|crisp-color|grid-color|fsr|integer)"' | awk -v more="$MORE_SHADERS" '
+        BEGIN { n = split(more, m, "\n"); for (i = 1; i <= n; i++) { split(m[i], f, "|"); extra["value=\"" f[1] "\""] = 1 } }
+        /<core name="drastic-sa"/ { sa = 1 }
+        sa && /<\/core>/ { sa = 0 }
+        sa && /<feature name="shader"/ { sh = 1 }
+        sh && /<\/feature>/ { sh = 0 }
+        sh && /<choice / && match($0, /value="[^"]*"/) && (substr($0, RSTART, RLENGTH) in extra) { next }
         depth == 0 && ($0 ~ /<feature name="resume on quit"/ || $0 ~ /<feature name="power profile"/ || $0 ~ /<feature name="share performance logs"/ || $0 ~ /<feature name="3D renderer"/ || $0 ~ /<feature name="3D texture filter"/ || $0 ~ /<feature name="3D resolution"/ || $0 ~ /<feature name="wfc dns"/) { if ($0 !~ /<\/feature>[ \t\r]*$/) depth = 1; next }
         depth > 0 {
             if ($0 ~ /<feature[ \t]/ && $0 !~ /\/>[ \t\r]*$/) depth++
@@ -55,7 +84,7 @@ strip_ours() {
 # our choices go at the end of the drastic-sa core's <feature name="shader">, indented like its other choices;
 # any earlier copy of them is dropped first, so this is idempotent. The resume option follows the shader option.
 add_ours() {
-    strip_ours < "$1" | awk '
+    strip_ours < "$1" | awk -v more="$MORE_SHADERS" '
         /<core name="drastic-sa"/ { core = 1 }
         core && /<\/core>/ { core = 0 }
         core && /<feature name="shader"/ { shader = 1 }
@@ -68,6 +97,7 @@ add_ours() {
             print ind "<choice name=\"ds-grid-2x (pixel-perfect + even DS grid)\" value=\"ds-grid-2x\" />"
             print ind "<choice name=\"ds-fsr (FSR 1.0, smooth edges)\" value=\"ds-fsr\" />"
             print ind "<choice name=\"ds-integer (pixel-perfect)\" value=\"ds-integer\" />"
+            n = split(more, xs, "\n"); for (i = 1; i <= n; i++) { split(xs[i], f, "|"); print ind "<choice name=\"" f[2] "\" value=\"" f[1] "\" />" }
             shader = 0; added = 1
             print; fi = ind; sub(/  $/, "", fi)
             print fi "<feature name=\"resume on quit\">"
