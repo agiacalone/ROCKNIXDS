@@ -187,6 +187,15 @@ class EsFeaturesTest(unittest.TestCase):
         self.assertIn("none", shader_values)
         self.assertIn("ds-crisp", shader_values)
         self.assertEqual(shader_values.count("ds-crisp"), 1)
+        # SuperDrastic's other shaders (rocknixds.11 on), once each, after ds-integer
+        extra = ["bevel", "fxaa", "lcd1x", "lcd1x-nds", "nds-color", "retro-v2", "sharp-bilinear-scanlines", "zfast-crt",
+                 "zfast-lcd", "drastic-lcd1x", "drastic-lcd1x-nds-color", "drastic-quilez", "drastic-sharp-bilinear",
+                 "drastic-sharp-bilinear-nds-color", "drastic-zfast-lcd", "drastic-zfast-lcd-nds-color",
+                 "nnddss-dot-mizai", "nnddss-dot-mizai-rgds", "nnddss-retro-tiles"]
+        at = shader_values.index("ds-integer") + 1
+        self.assertEqual(shader_values[at:at + len(extra)], extra)
+        for v in extra:
+            self.assertEqual(shader_values.count(v), 1, v)
         if "nestopia" in text:
             other = core_features(text, "nestopia")
             self.assertEqual(list(other), ["shader", "nested-parent"])
@@ -244,6 +253,25 @@ class EsFeaturesTest(unittest.TestCase):
         self.run_script("--strip-options")
         self.assertEqual(self.user.read_text(), text)
         self.assertEqual(self.systems.read_text(), "untouched\n")
+
+    def test_strip_options_removes_the_extra_shaders(self):
+        self.user.write_text(BASE)
+        self.run_script()
+        self.assertIn("nnddss-retro-tiles", self.user.read_text())
+        self.run_script("--strip-options")
+        text = self.user.read_text()
+        self.assertNotIn("nnddss", text)
+        self.assertNotIn("zfast-crt", text)
+
+    def test_extra_shader_values_elsewhere_are_kept(self):
+        # a value of ours in another core's option is ROCKNIX's, not ours: neither a run nor --strip-options drops it
+        other = '<choice name="theirs" value="zfast-crt"/>'
+        head, _, tail = BASE.rpartition("</features>")
+        self.user.write_text(head + '<core name="x"><features><feature name="shader">' + other + "</feature></features></core>\n</features>" + tail)
+        self.run_script()
+        self.assertEqual(self.user.read_text().count('value="zfast-crt"'), 2)
+        self.run_script("--strip-options")
+        self.assertIn(other, self.user.read_text())
 
     def test_strip_options_leaves_an_unmodified_file_alone(self):
         plain = BASE.replace(
