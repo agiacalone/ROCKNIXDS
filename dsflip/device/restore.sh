@@ -92,6 +92,9 @@ vt_back() {
                 [ -n "$S" ] && XDG_RUNTIME_DIR=$RT swaymsg -s "$S" '[app_id="emulationstation"] floating enable, fullscreen disable, resize set 1920 480, move absolute position 0 0' >/dev/null 2>&1
             fi
         fi
+        # Focus back on the menu. Without it ES could come back drawn but deaf to the pad, when sway left the focus
+        # on another window or seat during the game (upstream issue #89; the reporter's fix, with ssh, was this line).
+        [ -n "$S" ] && XDG_RUNTIME_DIR=$RT swaymsg -s "$S" '[app_id="emulationstation"] focus' >/dev/null 2>&1
     else
         echo "$(date) sway has no outputs after the VT switch: restarting it"
         systemctl restart sway.service; wait_outputs
