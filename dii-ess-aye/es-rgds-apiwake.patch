@@ -1,0 +1,72 @@
+From: Anthony Giacalone <anthony.giacalone@csulb.edu>
+Subject: [PATCH] ES: a launch from the HTTP API starts at once, not at the next full minute
+
+A launch through ES's HTTP API (POST /launch) started at the next full minute while the menu was idle. Two causes:
+
+- Window::postToUiThread woke the main loop with PowerSaver's refresh event, which does nothing while the power
+  saver is paused or off. It now also pushes an event of its own, so the wait returns within one 16 ms poll.
+- The launch then did ~6 s of work on the UI thread before its transition started, longer than the power saver's
+  awake time after an event (3 s in "enhanced"), so the loop went into standby with the transition unfinished and
+  the game waited for the next minute's wake (es-rgds-powersaver's clock wake). A pending launch
+  (ViewController::launchPending, capped at 10 s like es-rgds-launchonce) now counts as activity.
+
+A button press always woke the menu; this is for launches from the network (the Store, scripts, tools/smoke.sh).
+
+---
+diff --git a/es-app/src/main.cpp b/es-app/src/main.cpp
+index 2f65ba6e..71f77f2b 100644
+--- a/es-app/src/main.cpp
++++ b/es-app/src/main.cpp
+@@ -760,6 +760,13 @@ int main(int argc, char* argv[])
+ 	{
+ 		SDL_Event event;
+ 
++		// ROCKNIXDS (es-rgds-apiwake): a launch's transition must run to its end. A launch from the HTTP API runs on the
++		// UI thread after the request's wake event, and its own work (~6 s on an RG DS Plus before the transition starts)
++		// outlasted the power saver's awake time after that event (3 s, "enhanced"): the loop went into standby with the
++		// transition unfinished and the game only started at the next minute's wake. Count a pending launch as activity.
++		if (ViewController::launchPending())
++			ps_time = SDL_GetTicks();
++
+ 		int screenSaverTimeout = screensaver.getNextUpdateTimeout();
+ 		bool screenSaverWait = screenSaverTimeout > 0;
+ 
+diff --git a/es-app/src/views/ViewController.h b/es-app/src/views/ViewController.h
+index 3e802ed2..838520d4 100644
+--- a/es-app/src/views/ViewController.h
++++ b/es-app/src/views/ViewController.h
+@@ -36,6 +36,9 @@ public:
+ 	// a steady clock in ms: not SDL_GetTicks, which starts again when ES re-initialises SDL around a game it closes its
+ 	// window for (every launch but DraStic's fast switch)
+ 	static long long monoMs();
++	// ROCKNIXDS (es-rgds-apiwake): a launch's transition is running (started under 10 s ago; past that it was cancelled
++	// and the flag left set). The main loop stays out of power-saver standby meanwhile, or the transition stalls.
++	static bool launchPending() { return GuiComponent::isLaunchTransitionRunning && sLaunchStartedAt != 0 && monoMs() - sLaunchStartedAt < 10000; }
+ 	
+ 	static void saveState();
+ 
+diff --git a/es-core/src/Window.cpp b/es-core/src/Window.cpp
+index 2ce73c91..3206964f 100644
+--- a/es-core/src/Window.cpp
++++ b/es-core/src/Window.cpp
+@@ -1246,6 +1246,20 @@ void Window::postToUiThread(const std::function<void()>& func, void* data)
+ 	}
+ 	else // ROCKNIXDS: in power-saver standby the main loop only wakes on an event; a launch from the HTTP API waited up
+ 		PowerSaver::pushRefreshEvent();   // to a minute for it otherwise (no-op if one is already pending)
++
++	// ROCKNIXDS (es-rgds-apiwake.patch): wake the main loop whatever the power saver's state. pushRefreshEvent does
++	// nothing while the power saver is paused or off, and the slideshow screensaver's wait sleeps until its clock next
++	// changes (es-rgds-slideshow-wake.patch): a launch from the HTTP API then started at the next full minute. An event
++	// of our own makes the wait return within a poll (16 ms); the loop ignores its type and runs this function.
++	static Uint32 wakeEvent = (Uint32)-1;
++	if (wakeEvent == (Uint32)-1)
++		wakeEvent = SDL_RegisterEvents(1);
++	if (wakeEvent != (Uint32)-1)
++	{
++		SDL_Event ev {};
++		ev.type = wakeEvent;
++		SDL_PushEvent(&ev);
++	}
+ }
+ 
+ void Window::processPostedFunctions()
