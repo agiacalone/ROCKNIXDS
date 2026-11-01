@@ -12,7 +12,7 @@
 # Host tests point DK_DIR, DK_UPDATE_API (a releases list as GitHub gives it) and DK_UPDATE_BASE (where the packages
 # are, file:// works) at a temp tree; DK_MENU_DIRS at the menu folders to refresh; DK_ROCKNIXDS_ID and DK_TESTERS_BASE
 # at a test build's commit and where its testers/ folder is.
-REPO=JorreFog/ROCKNIXDS
+REPO=agiacalone/ROCKNIXDS
 D=${DK_DIR:-/storage/.config/rocknixds/dodakvarter}
 API=${DK_UPDATE_API:-https://api.github.com/repos/$REPO/releases?per_page=100}
 BASE=${DK_UPDATE_BASE:-https://github.com/$REPO/releases/download}

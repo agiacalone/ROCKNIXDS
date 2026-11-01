@@ -148,7 +148,7 @@ class Sandbox:
         files.update(media)
         notes = ("## Döda Kvarter %s\n\n- **Lock-on** is held: R2 held keeps the aim on the nearest zombie\n"
                  "- Easy, Medium and Hard ([details](https://example.invalid))\n- The game updates itself\n" % v)
-        return self.publish("JorreFog/ROCKNIXDS", "dodakvarter-v" + v, "dodakvarter-%s-aarch64.tar.gz" % v, files,
+        return self.publish("agiacalone/ROCKNIXDS", "dodakvarter-v" + v, "dodakvarter-%s-aarch64.tar.gz" % v, files,
                             "dodakvarter", exec_=("dodakvarter",), notes=notes)
 
     def publish_bank(self, v):
@@ -157,7 +157,7 @@ class Sandbox:
                  "media/bank-image.png": (REPO / "bank" / "device" / "media" / "bank-image.png").read_bytes(),
                  "media/bank-thumb.png": (REPO / "bank" / "device" / "media" / "bank-thumb.png").read_bytes(),
                  "media/bank-marquee.png": (REPO / "bank" / "device" / "media" / "bank-marquee.png").read_bytes()}
-        return self.publish("JorreFog/ROCKNIXDS", "bank-v" + v, "rocknixds-bank-%s-aarch64.tar.gz" % v, files,
+        return self.publish("agiacalone/ROCKNIXDS", "bank-v" + v, "rocknixds-bank-%s-aarch64.tar.gz" % v, files,
                             "rocknixds-bank", size=24156930, exec_=("rocknixds-bank",))
 
     def publish_hello(self, v, app_json=None, extra=None):

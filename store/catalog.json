@@ -18,7 +18,7 @@
    "screenshots": ["../dodakvarter/device/media/dodakvarter-image.png"],
    "devices": ["rgds", "rgds-plus"],
    "release": {
-    "github": "JorreFog/ROCKNIXDS",
+    "github": "agiacalone/ROCKNIXDS",
     "tag_prefix": "dodakvarter-v",
     "asset": "dodakvarter-{version}-aarch64.tar.gz"
    },
@@ -58,7 +58,7 @@
    "screenshots": ["../bank/device/media/bank-image.png"],
    "devices": ["rgds", "rgds-plus"],
    "release": {
-    "github": "JorreFog/ROCKNIXDS",
+    "github": "agiacalone/ROCKNIXDS",
     "tag_prefix": "bank-v",
     "asset": "rocknixds-bank-{version}-aarch64.tar.gz"
    },
@@ -132,7 +132,7 @@
    "icon": "../dii-ess-aye/themes/rocknixds-pixel-dark/rnds/icons/store.png",
    "devices": ["rgds", "rgds-plus"],
    "release": {
-    "github": "JorreFog/ROCKNIXDS",
+    "github": "agiacalone/ROCKNIXDS",
     "tag_prefix": "store-v",
     "asset": "rocknixds-store-{version}-aarch64.tar.gz"
    },
