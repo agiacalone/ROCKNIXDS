@@ -3,10 +3,11 @@
 # straight to both panels) + hires 3D. Run ON the Anbernic RG DS as root (ssh in, default password: rocknix):
 #
 #   curl -fsSL https://raw.githubusercontent.com/agiacalone/ROCKNIXDS/main/install.sh | sh
-#   curl -fsSL https://raw.githubusercontent.com/agiacalone/ROCKNIXDS/main/install.sh | sh -s -- --with-60hz
+#   curl -fsSL https://raw.githubusercontent.com/agiacalone/ROCKNIXDS/main/install.sh | sh -s -- --no-60hz
 #
 # Options:
-#   --with-60hz     also retune both panels to 60.000 Hz (edits the device tree in /flash; backed up; reboot needed)
+#   --no-60hz       don't retune the RG DS's panels to 60.000 Hz (on by default since 1.6.3.2; the RG DS only, it
+#                   edits the device tree in /flash, backed up, and needs a reboot; --with-60hz is still accepted)
 #   --no-theme      skip the theme + patched ES
 #   --no-canvas     skip the second theme, canvas-ds (a ~180 MB download, once)
 #   --no-dsflip     skip libdsflip (keep the stock DraStic display path)
@@ -45,10 +46,11 @@ WORK=/storage/.rgds-install
 ESF=/storage/.config/emulationstation/es_features.cfg
 VERSION_FILE=/storage/.config/rocknixds-version
 
-WITH_60HZ=0 THEME_ON=1 CANVAS_ON=1 DSFLIP_ON=1 HIRES_ON=1 GAME_ON=1 STORE_ON=1 UNINSTALL=0 RESTORE_FILES=0
+WITH_60HZ=1 THEME_ON=1 CANVAS_ON=1 DSFLIP_ON=1 HIRES_ON=1 GAME_ON=1 STORE_ON=1 UNINSTALL=0 RESTORE_FILES=0
 for a in "$@"; do
     case $a in
-    --with-60hz) WITH_60HZ=1 ;;
+    --with-60hz) WITH_60HZ=1 ASKED_60HZ=1 ;;
+    --no-60hz) WITH_60HZ=0 ;;
     --no-theme) THEME_ON=0 ;;
     --no-canvas) CANVAS_ON=0 ;;
     --no-dsflip) DSFLIP_ON=0 ;;
@@ -649,11 +651,21 @@ if [ $DSFLIP_ON = 1 ] && [ -f $SYSCFG ] && ! grep -q '^nds\.threaded_3d=' $SYSCF
     set_cfg nds.threaded_3d 1; touch $BACKUP/.threaded-3d-set
 fi
 
-# ---- 60 Hz panels (opt-in) -----------------------------------------------------------------------------
-if [ $WITH_60HZ = 1 ]; then
+# ---- 60 Hz panels (the RG DS; on by default, --no-60hz skips it) -----------------------------------------------
+# On by default since 1.6.3.2 (upstream issue #86: people expected it from the image). The script only touches the
+# RG DS's own device tree, and only when it holds the stock timing; the RG DS Plus has no such file and is skipped.
+# A reboot is asked for only when the timing was just written, not when it was already there. --no-60hz is
+# remembered (/storage/.config/rocknixds/no-60hz), since the menu's updates run this script without options;
+# --with-60hz forgets it.
+NO60=/storage/.config/rocknixds/no-60hz
+if [ $WITH_60HZ = 0 ]; then mkdir -p ${NO60%/*}; touch $NO60
+elif [ -n "$ASKED_60HZ" ]; then rm -f $NO60
+elif [ -e $NO60 ]; then WITH_60HZ=0; say "60 Hz retune skipped (--no-60hz was given before)"; fi
+if [ $WITH_60HZ = 1 ] && [ -f /flash/device_trees/rk3568-anbernic-rg-ds.dtb ]; then
     say "Retuning both panels to 60.000 Hz"
-    sh "$SRC/dii-ess-aye/device/apply-60hz-dtb.sh" || say "60 Hz step skipped (see message above)"
-    NEED_REBOOT=1
+    OUT60=$(sh "$SRC/dii-ess-aye/device/apply-60hz-dtb.sh" 2>&1) || say "60 Hz step skipped"
+    say "$OUT60"
+    case $OUT60 in *"applied; reboot"*) NEED_REBOOT=1 ;; esac
 fi
 
 # ---- Döda Kvarter: a game made for both screens -----------------------------------------------------------
