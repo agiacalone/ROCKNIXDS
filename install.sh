@@ -6,8 +6,8 @@
 #   curl -fsSL https://raw.githubusercontent.com/agiacalone/ROCKNIXDS/main/install.sh | sh -s -- --no-60hz
 #
 # Options:
-#   --no-60hz       don't retune the RG DS's panels to 60.000 Hz (on by default since 1.6.3.2; the RG DS only, it
-#                   edits the device tree in /flash, backed up, and needs a reboot; --with-60hz is still accepted)
+#   --no-60hz       don't retune the panels to 60 Hz (on by default since 1.6.3.2 / 1.6.4.2-plus; it edits the
+#                   device tree in /flash, backed up, and needs a reboot; --with-60hz is still accepted)
 #   --no-theme      skip the theme + patched ES
 #   --no-canvas     skip the second theme, canvas-ds (a ~180 MB download, once)
 #   --no-dsflip     skip libdsflip (keep the stock DraStic display path)
@@ -651,9 +651,10 @@ if [ $DSFLIP_ON = 1 ] && [ -f $SYSCFG ] && ! grep -q '^nds\.threaded_3d=' $SYSCF
     set_cfg nds.threaded_3d 1; touch $BACKUP/.threaded-3d-set
 fi
 
-# ---- 60 Hz panels (the RG DS; on by default, --no-60hz skips it) -----------------------------------------------
-# On by default since 1.6.3.2 (upstream issue #86: people expected it from the image). The script only touches the
-# RG DS's own device tree, and only when it holds the stock timing; the RG DS Plus has no such file and is skipped.
+# ---- 60 Hz panels (on by default, --no-60hz skips it) ---------------------------------------------------------
+# On by default since 1.6.3.2 / 1.6.4.2-plus (upstream issue #86: people expected it from the image). The script
+# picks the handheld's own device tree by its model (RG DS 60.10 -> 60.0013 Hz, RG DS Plus 60.17 -> 60.0027 Hz) and
+# patches it only when the live pixel clock and the stock timing string both match; otherwise it changes nothing.
 # A reboot is asked for only when the timing was just written, not when it was already there. --no-60hz is
 # remembered (/storage/.config/rocknixds/no-60hz), since the menu's updates run this script without options;
 # --with-60hz forgets it.
@@ -661,7 +662,7 @@ NO60=/storage/.config/rocknixds/no-60hz
 if [ $WITH_60HZ = 0 ]; then mkdir -p ${NO60%/*}; touch $NO60
 elif [ -n "$ASKED_60HZ" ]; then rm -f $NO60
 elif [ -e $NO60 ]; then WITH_60HZ=0; say "60 Hz retune skipped (--no-60hz was given before)"; fi
-if [ $WITH_60HZ = 1 ] && [ -f /flash/device_trees/rk3568-anbernic-rg-ds.dtb ]; then
+if [ $WITH_60HZ = 1 ] && [ -d /flash/device_trees ]; then
     say "Retuning both panels to 60.000 Hz"
     OUT60=$(sh "$SRC/dii-ess-aye/device/apply-60hz-dtb.sh" 2>&1) || say "60 Hz step skipped"
     say "$OUT60"
