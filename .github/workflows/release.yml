@@ -1,6 +1,8 @@
 # Publishes the GitHub release for a pushed version tag that has notes, with docs/releases/<tag>.md as its notes (the file's first
 # line, "# <title>", is the release's name) and the README's Pixel images attached. A tag ending in -plus is the RG DS
 # Plus's release and never becomes "latest": the 1.5 betas' updaters read releases/latest as the RG DS's release.
+# A release whose notes title says "beta" (1.6.3.2: a fork release not yet run on an RG DS) is a pre-release too, so
+# the stable channel (install.sh's and rocknixds-update's latest_release skip pre-releases) doesn't offer it.
 name: release
 on:
   push:
@@ -27,8 +29,8 @@ jobs:
         with:
           name: ${{ steps.notes.outputs.name }}
           body_path: body.md
-          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
-          make_latest: ${{ !endsWith(github.ref_name, '-plus') && !contains(github.ref_name, '-beta') && !contains(github.ref_name, '-alpha') }}
+          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') || contains(steps.notes.outputs.name, 'beta') }}
+          make_latest: ${{ !endsWith(github.ref_name, '-plus') && !contains(github.ref_name, '-beta') && !contains(github.ref_name, '-alpha') && !contains(steps.notes.outputs.name, 'beta') }}
           files: |
             docs/img/demo-light.webp
             docs/img/demo-dark.webp

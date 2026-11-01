@@ -17,7 +17,7 @@ Anbernic RG DS and RG DS Plus on ROCKNIX.</b></p>
 >   it over ssh on stock ROCKNIX, and `install.sh --uninstall` takes the device back to it. ROCKNIX's other
 >   systems, saves and services stay as they are.
 > - **It follows upstream's last releases** (1.6.3 on the RG DS, 1.6.4 on the RG DS Plus) with fixes added. Fork
->   releases add a fourth number: 1.6.3.1, 1.6.4.4-plus.
+>   releases add a fourth number: 1.6.3.2, 1.6.4.5-plus.
 > - **The Store, Döda Kvarter and Bank & Trade come from this fork,** so they keep working whatever happens
 >   upstream.
 > - **BananaOS features that suit ROCKNIX are being brought over,** credited to BananaOS (MIT).
