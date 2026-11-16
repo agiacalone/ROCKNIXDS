@@ -1,7 +1,7 @@
 # ROCKNIXDS Store
 
 **Games and apps for ROCKNIXDS, installed and updated from the menu.** Döda Kvarter, ROCKNIXDS Bank & Trade,
-casualducko's [eReaderDS](https://github.com/casualducko/eReaderDS) and every app that comes later are one press away: no ssh, no commands, and no waiting for a ROCKNIXDS release to get a new app or
+casualducko's [eReaderDS](https://github.com/casualducko/eReaderDS), kyannon's [GBA DS](https://github.com/kyannon/gba-ds) and every app that comes later are one press away: no ssh, no commands, and no waiting for a ROCKNIXDS release to get a new app or
 an update to one. Every app gets a tile of its own on the menu's shelf.
 
 <p align="center">
@@ -55,10 +55,16 @@ at its next check without a change to this repository.
 | App | Developer | Releases | Handhelds |
 |---|---|---|---|
 | eReaderDS: a two-page ebook reader | [casualducko](https://github.com/casualducko/eReaderDS) | `v<version>` tags, `eReaderDS-v<version>.zip` (pre-releases such as `v1.3.0-beta` are skipped, as its own updater skips them) | RG DS Plus (its developer's target), ROCKNIXDS 1.6 on |
+| GBA DS: Game Boy Advance with the game's own map on the second screen | [kyannon](https://github.com/kyannon/gba-ds) | `v<version>` tags, `gba-ds-v<version>-linux-aarch64.zip` | RG DS and RG DS Plus, ROCKNIXDS 1.6 on |
 
 eReaderDS goes to `/storage/.config/rocknixds/ereaderds` (the zip's `Ports` folder) with a tile of its own; books, fonts
 and its settings stay in `/storage/roms/ebook` (the `games-roms` share's `ebook` folder), also when it's removed or
 updated. A copy put in `roms/ports` by hand stays as it is: remove that one yourself if you use the Store's.
+
+GBA DS goes to `/storage/.config/rocknixds/gbads` (the zip's `gba-ds` folder) with a tile of its own. Its save states,
+settings, cheats, overlays, logos, patches and screenshots stay there when it is updated; its battery saves are the
+Game Boy Advance list's own. It updates itself as well, and the Store reads its version from `licenses/README.txt`. A
+copy in `roms/ports` stays as it is.
 
 Over ssh, the same as root:
 

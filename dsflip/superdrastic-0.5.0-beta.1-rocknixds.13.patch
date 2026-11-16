@@ -1,0 +1,924 @@
+From c33ba55610ab5d16138dd06e00a0c8de5663af90 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Sun, 15 Nov 2026 11:08:56 +0000
+Subject: [PATCH 1/7] Touch lookup: realpath's buffer is PATH_MAX, so a
+ fortified build does not abort at startup
+
+glibc's __realpath_chk aborts when the resolved-path buffer is shorter than PATH_MAX. touch_find passed 512 bytes, so BananaLinux (built with _FORTIFY_SOURCE) died in the touch thread before the first frame. The same call with PATH_MAX is what the release line already uses.
+
+Co-authored-by: Joar <JorreFog@users.noreply.github.com>
+(cherry picked from commit 296c2734c6578744da4594642a511300fcae8aff)
+---
+ src/dsflip.c                  |  3 +-
+ tools/realpath-fortify-test.c | 70 +++++++++++++++++++++++++++++++++++
+ 2 files changed, 72 insertions(+), 1 deletion(-)
+ create mode 100644 tools/realpath-fortify-test.c
+
+diff --git a/src/dsflip.c b/src/dsflip.c
+index b7c88e5..4a003b1 100644
+--- a/src/dsflip.c
++++ b/src/dsflip.c
+@@ -33,6 +33,7 @@
+ //   DSHOOK_SHADER=name             ES's DraStic "shader" setting; anything but bilinear/none runs that shader on the
+ //                                  GPU (shader.c). DSFLIP_SHADER overrides it
+ #define _GNU_SOURCE
++#include <limits.h>
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -1394,7 +1395,7 @@ static int touch_find(const char *want, char *path, size_t n) {   /* the evdev n
+     glob_t g; *path = 0;
+     if (glob("/sys/class/input/event*", 0, 0, &g)) return -1;
+     for (size_t i = 0; i < g.gl_pathc && !*path; i++) {
+-        char dev[300], real_[512]; snprintf(dev, sizeof dev, "%s/device", g.gl_pathv[i]);
++        char dev[300], real_[PATH_MAX]; snprintf(dev, sizeof dev, "%s/device", g.gl_pathv[i]);   /* realpath wants PATH_MAX: a smaller buffer aborts under _FORTIFY_SOURCE */
+         if (realpath(dev, real_) && strstr(real_, want)) snprintf(path, n, "/dev/input/%s", strrchr(g.gl_pathv[i], '/') + 1);
+     }
+     globfree(&g);
+diff --git a/tools/realpath-fortify-test.c b/tools/realpath-fortify-test.c
+new file mode 100644
+index 0000000..d8d890b
+--- /dev/null
++++ b/tools/realpath-fortify-test.c
+@@ -0,0 +1,70 @@
++/* glibc's fortified realpath aborts when the resolved-path buffer is smaller than PATH_MAX,
++ * before it looks at the path (__realpath_chk). touch_find used 512 bytes, so a build with
++ * _FORTIFY_SOURCE (BananaLinux) died in the touch thread at startup and the game never showed a frame.
++ *
++ *   gcc -O2 -D_FORTIFY_SOURCE=2 -o /tmp/realpath-fortify-test tools/realpath-fortify-test.c
++ *   /tmp/realpath-fortify-test
++ *
++ * Run from the repo root. The PATH_MAX call must succeed. The old 512-byte call must die with SIGABRT.
++ * src/dsflip.c's touch_find buffer must be PATH_MAX.
++ */
++#define _GNU_SOURCE
++#include <fcntl.h>
++#include <limits.h>
++#include <signal.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++static int source_ok(void) {
++    FILE *f = fopen("src/dsflip.c", "r");
++    if (!f) { fprintf(stderr, "run from the repo root (src/dsflip.c not found)\n"); return 0; }
++    char line[800];
++    int good = 0, bad = 0;
++    while (fgets(line, sizeof line, f)) {
++        if (strstr(line, "real_[512]")) bad = 1;
++        if (strstr(line, "real_[PATH_MAX]")) good = 1;
++    }
++    fclose(f);
++    if (bad || !good) {
++        fprintf(stderr, "touch_find buffer: PATH_MAX present %d, 512-byte present %d\n", good, bad);
++        return 0;
++    }
++    return 1;
++}
++
++/* the buffer touch_find used to pass. object size is visible, so fortify checks it. */
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wattribute-warning"
++static int short_buf(void) {
++    char buf[512];
++    return realpath("/proc/self/exe", buf) ? 0 : 2;
++}
++#pragma GCC diagnostic pop
++
++static int short_aborts(void) {
++    pid_t p = fork();
++    if (p < 0) return 0;
++    if (p == 0) {
++        int n = open("/dev/null", O_WRONLY);
++        if (n >= 0) dup2(n, 2);
++        _exit(short_buf());
++    }
++    int st = 0;
++    if (waitpid(p, &st, 0) < 0) return 0;
++    return WIFSIGNALED(st) && WTERMSIG(st) == SIGABRT;
++}
++
++int main(void) {
++    if (!source_ok()) return 1;
++    char buf[PATH_MAX];
++    if (!realpath("/proc/self/exe", buf)) { perror("realpath PATH_MAX"); return 1; }
++    if (!short_aborts()) {
++        fprintf(stderr, "a 512-byte realpath buffer did not abort; compile with -O2 -D_FORTIFY_SOURCE=2\n");
++        return 1;
++    }
++    printf("realpath-fortify-test: ok\n");
++    return 0;
++}
+-- 
+2.56.0
+
+
+From 5a39fbb31dd1f8307686416cfcc79e3ad1be45d8 Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 18:54:02 +0100
+Subject: [PATCH 2/7] NNDDSS shaders: SCREEN_RES_SCALE from the frame's width,
+ not 1/width (BananaLinux #76)
+
+Dot (MiZai), Dot (MiZai, RG DS+) and Retro tiles drew no dot / tile grid: conv-dfx.py set SCREEN_RES_SCALE to
+(u_texture_size.x / 256.0) and then renamed u_texture_size to DSF_TS, which is (1/w, 1/h, w, h), so the scale
+was 1/(256 w) (~1/65536 at 2x) and pixel_no ran ~65,000 times too fine. Now (DSF_TS.z / 256.0): 1 at 1x, 2 at 2x.
+The three shipped shaders get the same one-line change (the NNDDSS sources aren't in the repo to convert again).
+
+Test: tools/shaders/tests/conv-dfx-test.py (python3 -I): red before (the converter's output and the 3 shaders),
+green after.
+On device (RG DS, BananaOS 0.5.3, Mali-G52, shtest on the colour-bar/checker/gradient picture, 512x384 = 2x and
+256x192): stock Dot MiZai flat and dimmed with no grid, stock Retro tiles a white picture; fixed: one dot / tile
+per DS pixel, full brightness. Dot MiZai RG DS+ also through BananaDS's real launcher (bind mount, undone): loads
+and draws. Not checked on the Plus or in SuperDrastic (DraStic) itself.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01StxwK2dxEyPmeRLuqBRYJ3
+(cherry picked from commit 1447d4269c799be8b5f9e6d72fc0cd6ca97f998d)
+---
+ shaders/nnddss-dot-mizai-rgds.frag   |  4 ++--
+ shaders/nnddss-dot-mizai.frag        |  4 ++--
+ shaders/nnddss-retro-tiles.frag      |  4 ++--
+ tools/shaders/conv-dfx.py            |  9 ++++----
+ tools/shaders/tests/conv-dfx-test.py | 33 ++++++++++++++++++++++++++++
+ 5 files changed, 44 insertions(+), 10 deletions(-)
+ create mode 100644 tools/shaders/tests/conv-dfx-test.py
+
+diff --git a/shaders/nnddss-dot-mizai-rgds.frag b/shaders/nnddss-dot-mizai-rgds.frag
+index 8c9aced..d5a03d1 100644
+--- a/shaders/nnddss-dot-mizai-rgds.frag
++++ b/shaders/nnddss-dot-mizai-rgds.frag
+@@ -13,12 +13,12 @@ uniform vec2 u_output_size;
+ #define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
+ 
+ // screen resolution scale (2.0 for current High-Resolution 3D Rendering)
+-#define SCREEN_RES_SCALE (DSF_TS.x / 256.0)
++#define SCREEN_RES_SCALE (DSF_TS.z / 256.0)
+ // dot softness in texels; 0 enables the fast path (single texel fetch)
+ #define SOFT 0
+ 
+ #ifndef SCREEN_RES_SCALE
+-#define SCREEN_RES_SCALE (DSF_TS.x / 256.0)
++#define SCREEN_RES_SCALE (DSF_TS.z / 256.0)
+ #endif
+ 
+ #ifndef SOFT
+diff --git a/shaders/nnddss-dot-mizai.frag b/shaders/nnddss-dot-mizai.frag
+index 19c04f3..2c14ac0 100644
+--- a/shaders/nnddss-dot-mizai.frag
++++ b/shaders/nnddss-dot-mizai.frag
+@@ -13,12 +13,12 @@ uniform vec2 u_output_size;
+ #define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
+ 
+ // screen resolution scale (2.0 for current High-Resolution 3D Rendering)
+-#define SCREEN_RES_SCALE (DSF_TS.x / 256.0)
++#define SCREEN_RES_SCALE (DSF_TS.z / 256.0)
+ // dot softness in texels; 0 enables the fast path (single texel fetch)
+ #define SOFT 0
+ 
+ #ifndef SCREEN_RES_SCALE
+-#define SCREEN_RES_SCALE (DSF_TS.x / 256.0)
++#define SCREEN_RES_SCALE (DSF_TS.z / 256.0)
+ #endif
+ 
+ #ifndef SOFT
+diff --git a/shaders/nnddss-retro-tiles.frag b/shaders/nnddss-retro-tiles.frag
+index 210bee4..7c8de2b 100644
+--- a/shaders/nnddss-retro-tiles.frag
++++ b/shaders/nnddss-retro-tiles.frag
+@@ -12,7 +12,7 @@ uniform vec2 u_texture_size;
+ uniform vec2 u_output_size;
+ #define DSF_TS vec4(1.0 / u_texture_size, u_texture_size)
+ 
+-#define SCREEN_RES_SCALE (DSF_TS.x / 256.0)
++#define SCREEN_RES_SCALE (DSF_TS.z / 256.0)
+ 
+ #if GL_ES
+ 
+@@ -58,7 +58,7 @@ void dsf_vert()
+     vTexCoord = middle + diff * scale;  // å±ä¸­å¹¶ç¼©æ¾çº¹çåæ 
+ }
+ 
+-#define SCREEN_RES_SCALE (DSF_TS.x / 256.0)
++#define SCREEN_RES_SCALE (DSF_TS.z / 256.0)
+ 
+ #if GL_ES
+ 
+diff --git a/tools/shaders/conv-dfx.py b/tools/shaders/conv-dfx.py
+index 740d342..7568176 100644
+--- a/tools/shaders/conv-dfx.py
++++ b/tools/shaders/conv-dfx.py
+@@ -37,14 +37,15 @@ vcode = re.sub(r'\ba_texture_coordinate\b', 'v_texcoord', vcode)
+ vcode = re.sub(r'\ba_vertex_coordinate\b', '(v_texcoord * 2.0 - 1.0)', vcode)
+ fcode = strip_decls(fs, False)
+ fcode = re.sub(r'\bvoid\s+main\s*\(\s*(void)?\s*\)', 'void dsf_frag()', fcode)
+-# the screen scale some shaders fix at 1.0 (NNDDSS's Dot: 2.0 at 2x): from the frame's size instead
++# the screen scale some shaders fix at 1.0 (NNDDSS's Dot: 2.0 at 2x): from the frame's size instead (DSF_TS.z, the
++# width: .x is 1/w, and u_texture_size.x here was renamed to that below; the scale came out ~1/65536, BananaLinux #76)
+ pre_all = vh + '\n' + hd + '\n' + inc
+-pre_all = re.sub(r'#define\s+SCREEN_RES_SCALE\s+[0-9.]+', '#define SCREEN_RES_SCALE (u_texture_size.x / 256.0)', pre_all)
+-vcode = re.sub(r'#define\s+SCREEN_RES_SCALE\s+[0-9.]+', '#define SCREEN_RES_SCALE (u_texture_size.x / 256.0)', vcode)
++pre_all = re.sub(r'#define\s+SCREEN_RES_SCALE\s+[0-9.]+', '#define SCREEN_RES_SCALE (DSF_TS.z / 256.0)', pre_all)
++vcode = re.sub(r'#define\s+SCREEN_RES_SCALE\s+[0-9.]+', '#define SCREEN_RES_SCALE (DSF_TS.z / 256.0)', vcode)
+ vcode = re.sub(r'const\s+float\s+screen_res_scale\s*=\s*SCREEN_RES_SCALE\s*;', '#define screen_res_scale SCREEN_RES_SCALE', vcode)
+ fhead = re.sub(r'#if GL_ES\s*\n\s*(#ifdef GL_FRAGMENT_PRECISION_HIGH.*?#endif|precision \w+ float;)\s*\n#endif', '', fh, flags=re.S)
+ body = pre_all + '\n' + vcode + '\n' + fhead + '\n' + hd + '\n' + fcode
+-body = re.sub(r'#define\s+SCREEN_RES_SCALE\s+[0-9.]+', '#define SCREEN_RES_SCALE (u_texture_size.x / 256.0)', body)
++body = re.sub(r'#define\s+SCREEN_RES_SCALE\s+[0-9.]+', '#define SCREEN_RES_SCALE (DSF_TS.z / 256.0)', body)
+ body = re.sub(r'^\s*uniform\s+[^;]*;\s*$', '', body, flags=re.M)   # DraStic's built-ins and samplers: ours
+ body = re.sub(r'^\s*precision\s+\w+\s+\w+\s*;\s*$', '', body, flags=re.M)
+ body = re.sub(r'\bu_texture_size\b', 'DSF_TS', body)
+diff --git a/tools/shaders/tests/conv-dfx-test.py b/tools/shaders/tests/conv-dfx-test.py
+new file mode 100644
+index 0000000..d4a9177
+--- /dev/null
++++ b/tools/shaders/tests/conv-dfx-test.py
+@@ -0,0 +1,33 @@
++#!/usr/bin/env python3
++# conv-dfx-test.py: conv-dfx.py's SCREEN_RES_SCALE (NNDDSS's Dot and Retro tiles fix it at 1.0 / 2.0) must come out
++# as the frame's width / 256 (1 at 1x, 2 at 2x). DSF_TS is (1/w, 1/h, w, h): .x is 1/w, which made the scale
++# ~1/65536 and the dot grid a noise (BananaLinux #76). Also checks the shipped shaders/*.frag. Run with python3 -I.
++import os, re, subprocess, sys, tempfile
++HERE = os.path.dirname(os.path.abspath(__file__))
++ROOT = os.path.dirname(os.path.dirname(os.path.dirname(HERE)))
++fails = 0
++def check(ok, what):
++    global fails
++    if not ok: print('FAIL ' + what); fails += 1
++with tempfile.TemporaryDirectory() as t:
++    open(os.path.join(t, 't.dsd'), 'w').write('<vertex>\nattribute vec2 a_vertex_coordinate;\nattribute vec2 a_texture_coordinate;\n'
++        'uniform vec4 u_texture_size;\nvarying vec2 pixel_no;\nconst float screen_res_scale = SCREEN_RES_SCALE;\n'
++        'void main() { pixel_no = a_texture_coordinate * u_texture_size.zw / screen_res_scale; gl_Position = vec4(a_vertex_coordinate, 0.0, 1.0); }\n</vertex>\n'
++        '<fragment>\nuniform sampler2D u_texture;\nvarying vec2 pixel_no;\nvoid main() { gl_FragColor = vec4(fract(pixel_no), 0.0, 1.0); }\n</fragment>\n')
++    open(os.path.join(t, 't.dfx'), 'w').write('<vheader>\n#define SCREEN_RES_SCALE 2.0\n</vheader>\n<fheader>\n</fheader>\n<header>\n</header>\n'
++        '<pass>\nshader=t.dsd\nsampler:u_texture=0\n</pass>\n')
++    out = os.path.join(t, 'o.frag')
++    r = subprocess.run([sys.executable, '-I', os.path.join(ROOT, 'tools/shaders/conv-dfx.py'), os.path.join(t, 't.dfx'), out, 't', 'test'],
++                       capture_output=True, text=True)
++    check(r.returncode == 0, 'conv-dfx.py exited %d: %s' % (r.returncode, r.stderr.strip()[-300:]))
++    if r.returncode == 0:
++        src = open(out).read()
++        defs = re.findall(r'#define\s+SCREEN_RES_SCALE\s+(.*)', src)
++        check(bool(defs), 'no SCREEN_RES_SCALE in the converted shader')
++        for d in defs: check(d.strip() == '(DSF_TS.z / 256.0)', 'converted SCREEN_RES_SCALE is %s, not (DSF_TS.z / 256.0)' % d.strip())
++for f in sorted(os.listdir(os.path.join(ROOT, 'shaders'))):
++    if not f.endswith('.frag'): continue
++    for d in re.findall(r'#define\s+SCREEN_RES_SCALE\s+(.*)', open(os.path.join(ROOT, 'shaders', f)).read()):
++        check(d.strip() == '(DSF_TS.z / 256.0)', 'shaders/%s: SCREEN_RES_SCALE %s' % (f, d.strip()))
++print('conv-dfx-test: all passed' if not fails else 'conv-dfx-test: %d failed' % fails)
++sys.exit(1 if fails else 0)
+-- 
+2.56.0
+
+
+From 92a60c7156819c6bdc33c44fb56acf6116f424b1 Mon Sep 17 00:00:00 2001
+From: JorreFog <JorreFog@users.noreply.github.com>
+Date: Wed, 4 Nov 2026 22:39:16 +0100
+Subject: [PATCH 3/7] Retro tiles: tiles without the blown-out half (pos
+ without its sign for fade)
+
+With SCREEN_RES_SCALE right the shader still looked really bad on the RG DS (the owner's words): pos ran -0.5..0.5 into
+fade(), which gives up to 4x brightness for a negative distance, so half of each tile was clipped towards white.
+pos = abs(pos) once dir has the sign. Only the shipped .frag changes: the NNDDSS source isn't in the repo.
+
+Test: tools/shaders/tests/conv-dfx-test.py checks it (fails on the file before this). On device (RG DS, BananaOS 0.5.3,
+Mali-G52, shtest's colour bars at 2x): white-clipped pixels 9.2% -> 2.0%, real tiles with dark gaps; darker overall (mean
+122 -> 69), gaps a little uneven at the RG DS's 2.5x. Through BananaDS's menu in a game, on the owner's screen: "good
+enough". Not checked on the Plus, the panel it was made for.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01StxwK2dxEyPmeRLuqBRYJ3
+(cherry picked from commit 87e45514695da0839aaa8d77d73a0aa73f1a2428)
+---
+ shaders/nnddss-retro-tiles.frag      | 1 +
+ tools/shaders/tests/conv-dfx-test.py | 4 ++++
+ 2 files changed, 5 insertions(+)
+
+diff --git a/shaders/nnddss-retro-tiles.frag b/shaders/nnddss-retro-tiles.frag
+index 7c8de2b..8583db3 100644
+--- a/shaders/nnddss-retro-tiles.frag
++++ b/shaders/nnddss-retro-tiles.frag
+@@ -91,6 +91,7 @@ void dsf_frag() {
+     // ç·ç ææè®¡ç®
+     vec2 pos = fract(vTexCoord * DSF_TS.zw / SCREEN_RES_SCALE) - vec2(0.5);
+     vec2 dir = sign(pos);
++    pos = abs(pos);
+     vec2 g1 = dir * vec2(DSF_TS.x, 0.0);  // 1/w step
+     vec2 g2 = dir * vec2(0.0, DSF_TS.y);  // 1/h step
+ 
+diff --git a/tools/shaders/tests/conv-dfx-test.py b/tools/shaders/tests/conv-dfx-test.py
+index d4a9177..dbf7e7a 100644
+--- a/tools/shaders/tests/conv-dfx-test.py
++++ b/tools/shaders/tests/conv-dfx-test.py
+@@ -29,5 +29,9 @@ for f in sorted(os.listdir(os.path.join(ROOT, 'shaders'))):
+     if not f.endswith('.frag'): continue
+     for d in re.findall(r'#define\s+SCREEN_RES_SCALE\s+(.*)', open(os.path.join(ROOT, 'shaders', f)).read()):
+         check(d.strip() == '(DSF_TS.z / 256.0)', 'shaders/%s: SCREEN_RES_SCALE %s' % (f, d.strip()))
++# Retro tiles: fade() takes a distance, so pos has to be without its sign once dir has it (with it, one half of each tile
++# came out up to 4x too bright: BananaLinux, the owner's "looks really bad" on the RG DS)
++rt = open(os.path.join(ROOT, 'shaders', 'nnddss-retro-tiles.frag'), encoding='utf-8', errors='surrogateescape').read()
++check(re.search(r'vec2 dir = sign\(pos\);\s*pos = abs\(pos\);', rt) is not None, 'nnddss-retro-tiles.frag: pos keeps its sign after dir')
+ print('conv-dfx-test: all passed' if not fails else 'conv-dfx-test: %d failed' % fails)
+ sys.exit(1 if fails else 0)
+-- 
+2.56.0
+
+
+From a76031a4d2660851c281788f8495eb6c87303e49 Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Thu, 1 Oct 2026 11:12:40 +0000
+Subject: [PATCH 4/7] Quit-save keeps the previous resume state if the new one
+ doesn't finish
+
+SIGUSR1 deleted DSFLIP_RESUME_FILE before DraStic had written a replacement.
+A save that timed out (5 s) or failed (full disk) then quit with no resume
+file at all, including the last good one. The rename hook already replaces
+that file only once the new state is complete, so the early unlink is gone.
+
+Co-authored-by: JorreFog <JorreFog@users.noreply.github.com>
+(cherry picked from commit 33a798c94f17637946319d2df9f2623ff848c434)
+---
+ .github/workflows/build.yml |  2 +
+ docs/INTEGRATION.md         |  2 +-
+ src/resume.c                |  9 +++-
+ tools/README.md             |  1 +
+ tools/resume-keep-test.c    | 83 +++++++++++++++++++++++++++++++++++++
+ 5 files changed, 94 insertions(+), 3 deletions(-)
+ create mode 100644 tools/resume-keep-test.c
+
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index b7d521d..ae7b727 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -45,6 +45,8 @@ jobs:
+             llvm-nm -D --defined-only $L | grep -q " $s\$" || { echo "hook $s missing"; exit 1; }
+           done
+           sh -n runner/superdrastic-run && sh -n runner/superdrastic-update
++          clang -O2 -Wall -Wextra -o /tmp/resume-keep-test tools/resume-keep-test.c src/resume.c -ldl -lpthread
++          /tmp/resume-keep-test
+       - name: Package
+         run: sh package.sh
+       - uses: actions/upload-artifact@v4
+diff --git a/docs/INTEGRATION.md b/docs/INTEGRATION.md
+index e8e9473..50ea801 100644
+--- a/docs/INTEGRATION.md
++++ b/docs/INTEGRATION.md
+@@ -87,7 +87,7 @@ Exit hotkeys usually kill DraStic (`kill -9`), which loses the game's place. Sen
+ `DSFLIP_RESUME_FILE`: SuperDrastic presses DraStic's own "save state" control (the joystick button `drastic.cfg`
+ maps to it), writes the savestate to that file instead of one of the player's slots, and exits with SIGKILL (status
+ 137, as a hotkey kill). Measured on the RG DS: ~0.8 s for the save. A second SIGUSR1, or no savestate within 5 s,
+-exits at once. Start the game next time with `DSFLIP_RESUME_LOAD=1` as well: once it runs, SuperDrastic presses
++exits at once; a resume file already there is left as it was if that save doesn't finish. Start the game next time with `DSFLIP_RESUME_LOAD=1` as well: once it runs, SuperDrastic presses
+ "load state" with DraStic's lookup pointed at the resume file, shows a "Resumed" pop-up and deletes the file.
+ 
+ Keep the file in DraStic's `savestates/` folder (a rename, no copy) and name it anything but `<game>_<digit>.dss`.
+diff --git a/src/resume.c b/src/resume.c
+index c2187cc..e8c03d5 100644
+--- a/src/resume.c
++++ b/src/resume.c
+@@ -16,6 +16,8 @@
+ // DraStic's savestate file calls.
+ // DSFLIP_RESUME_ON_QUIT=0: only SIGUSR1 saves; the in-game menu's Quit and the exit combos quit at once, as without a
+ // file (a frontend whose own quick resume is off, that still saves the game before a power-off of its own).
++// The previous resume file stays until DraStic's rename replaces it, so a save that doesn't finish (the 5 s timeout,
++// a full disk) leaves the last good state in place.
+ #define _GNU_SOURCE
+ #include <dlfcn.h>
+ #include <errno.h>
+@@ -258,7 +260,9 @@ static void *save_thread(void *a) {
+     long long t0 = now_ms();
+     while (!saved && now_ms() - t0 < 5000) usleep(20000);
+     if (saved == 1) dsflip_log("[resume] saved in %lld ms: quitting\n", now_ms() - t0);
+-    else dsflip_log("[resume] %s: quitting without one\n", saved ? "the resume state couldn't be written" : "no savestate within 5 s");
++    else dsflip_log("[resume] %s: quitting without one%s\n",
++                    saved ? "the resume state couldn't be written" : "no savestate within 5 s",
++                    resume_path[0] && access(resume_path, R_OK) == 0 ? " (previous resume state kept)" : "");
+     quit_kill();
+     return 0;
+ }
+@@ -310,7 +314,8 @@ void resume_frame(void) {
+         saving = 1; want_save = 0;
+         dsflip_log("[resume] quit requested: saving a resume state\n");
+         cpugov_boost(3000);                           /* the top clock from the press on: DraStic compresses ~6.5 MB */
+-        unlink(resume_path);
++        /* the previous state isn't unlinked here: the rename hook replaces it only once the new file is complete.
++         * Deleting first threw the last good resume away whenever the save timed out or failed. */
+         resume_press(btn_save);
+         pthread_t t; if (pthread_create(&t, 0, save_thread, 0)) quit_kill();
+         pthread_setname_np(t, "dsf-resume");
+diff --git a/tools/README.md b/tools/README.md
+index 809903b..c82de61 100644
+--- a/tools/README.md
++++ b/tools/README.md
+@@ -14,4 +14,5 @@ Test and measurement tools, run on the device unless noted.
+ | `ramp.py` | Maps a stress-ROM run's presents to its levels |
+ | `shaders.sh`, `shbench.sh` | GPU time per shader on real frames (run `shaders.sh` on a PC with `RGDS_SSH`/`RGDS_HOST`; it pushes `build/shtest`, `shaders/` and `shbench.sh` to the device) |
+ | `gen-color-shaders.py` | Writes `ds-crisp-color` and `ds-grid-color` from `ds-crisp` and `ds-grid` (on a PC) |
++| `resume-keep-test.c` | Host test: a quit-save leaves the previous resume file until the new one replaces it (`clang -O2 -o /tmp/resume-keep-test tools/resume-keep-test.c src/resume.c -ldl -lpthread`) |
+ | `dev/` | The scripts used while bringing SuperDrastic up on the RG DS under ROCKNIX (they assume its paths) |
+diff --git a/tools/resume-keep-test.c b/tools/resume-keep-test.c
+new file mode 100644
+index 0000000..3880076
+--- /dev/null
++++ b/tools/resume-keep-test.c
+@@ -0,0 +1,83 @@
++/* Host test: a quit-save must not destroy an existing resume file before the new state replaces it.
++ * Links src/resume.c (its libc hooks and all) and drives the public entry points.
++ * A save thread SIGKILLs this process after 5 s, so the checks finish with _exit. */
++#include <errno.h>
++#include <fcntl.h>
++#include <signal.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++void resume_start(void);
++void resume_frame(void);
++void dsflip_log(const char *fmt, ...) { (void)fmt; }
++void dsflip_toast(const char *l1, const char *l2, unsigned accent, int ms) {
++    (void)l1; (void)l2; (void)accent; (void)ms;
++}
++
++/* the rest of libsuperdrastic that resume.c calls, as no-ops */
++const char *menu_game_title(void) { return "test"; }
++void cpugov_boost(int ms) { (void)ms; }
++void audio_mute(int on) { (void)on; }
++void audio_hand_off(void) {}
++volatile int dsflip_hold;
++
++static void die(const char *m) { perror(m); _exit(2); }
++static int read_file(const char *p, char *buf, int n) {
++    int fd = open(p, O_RDONLY);
++    if (fd < 0) return -1;
++    int r = (int)read(fd, buf, n);
++    close(fd);
++    return r;
++}
++
++int main(void) {
++    char dir[] = "/tmp/resume-keep-XXXXXX";
++    if (!mkdtemp(dir)) die("mkdtemp");
++    if (chdir(dir)) die("chdir");
++    if (mkdir("config", 0755)) die("mkdir");
++    FILE *cfg = fopen("config/drastic.cfg", "w");
++    if (!cfg) die("cfg");
++    if (fputs("controls_a[CONTROL_INDEX_SAVE_STATE] = 1030\n"
++              "controls_a[CONTROL_INDEX_LOAD_STATE] = 1031\n", cfg) < 0) die("cfg write");
++    if (fclose(cfg)) die("cfg close");
++
++    char path[512];
++    snprintf(path, sizeof path, "%s/resume.dss", dir);
++    FILE *old = fopen(path, "w");
++    if (!old) die("resume");
++    if (fputs("KEEP", old) < 0) die("resume write");
++    if (fclose(old)) die("resume close");
++
++    setenv("DSFLIP_RESUME_FILE", path, 1);
++    unsetenv("DSFLIP_RESUME_LOAD");
++    resume_start();
++    raise(SIGUSR1);
++    resume_frame();   /* starts the save; must not unlink the previous state */
++
++    char got[8] = { 0 };
++    int n = read_file(path, got, 4);
++    if (n != 4 || memcmp(got, "KEEP", 4)) {
++        fprintf(stderr, "previous resume state was destroyed at the start of a save (read %d)\n", n);
++        _exit(1);
++    }
++
++    /* DraStic finishes: rename of the temp file onto a slot, which the hook sends to the resume file. */
++    FILE *neu = fopen("new.dss", "w");
++    if (!neu) die("new");
++    if (fputs("NEWSTATE", neu) < 0) die("new write");
++    if (fclose(neu)) die("new close");
++    if (rename("new.dss", "game_0.dss")) die("rename");
++    n = read_file(path, got, 7);
++    if (n != 7 || memcmp(got, "NEWSTATE", 7)) {
++        fprintf(stderr, "a finished save did not replace the resume file (read %d)\n", n);
++        _exit(1);
++    }
++    if (access("game_0.dss", F_OK) == 0) {
++        fprintf(stderr, "the save landed in the player's slot\n");
++        _exit(1);
++    }
++    _exit(0);
++}
+-- 
+2.56.0
+
+
+From 920aaad4f2055c596403a81f64ca2eafe53e97be Mon Sep 17 00:00:00 2001
+From: Cursor Agent <cursoragent@cursor.com>
+Date: Mon, 2 Nov 2026 11:17:46 +0000
+Subject: [PATCH 5/7] In-game menu: a control let go while it is open is let go
+ in the game
+
+DraStic sits inside SDL_PollEvent for the whole menu, so the release of a
+direction, button, stick, hat, or stylus never reaches it. After Resume the
+game keeps that control held. Releases of controls that were already held,
+and the stick and hat's position at close, are queued for the next polls.
+Presses that only drove the menu are not passed on.
+
+Co-authored-by: JorreFog <JorreFog@users.noreply.github.com>
+(cherry picked from commit ddd892b9f3e436aa1808942be3ccfa5723949402)
+---
+ src/dsflip.c           | 12 ++++++--
+ src/menu.c             | 41 ++++++++++++++++++++++++-
+ src/resume.c           | 48 +++++++++++++++++++++++++++++
+ tools/ut/t_hold_diff.c | 68 ++++++++++++++++++++++++++++++++++++++++++
+ 4 files changed, 166 insertions(+), 3 deletions(-)
+ create mode 100644 tools/ut/t_hold_diff.c
+
+diff --git a/src/dsflip.c b/src/dsflip.c
+index 4a003b1..6a4968e 100644
+--- a/src/dsflip.c
++++ b/src/dsflip.c
+@@ -1311,11 +1311,19 @@ void dsflip_mic_restart(int button) {
+     sdl_ev e; memset(&e, 0, sizeof e); e.type = EV_BARRIER; push_ev(&e);
+     if (button >= 0) dsflip_mic_button(button, 1); else dsflip_mic_key(1);
+ }
++static int sty_x = -1, sty_y = -1, sty_btn;   /* sty_btn: DraStic was sent a stylus-down and not the matching up */
++/* the in-game menu swallowed the finger-up (menu.c): DraStic still has the stylus down */
++void dsflip_stylus_lift(void) {
++    if (!sty_btn) return;
++    sdl_ev e; memset(&e, 0, sizeof e);
++    e.b.type = 0x402; e.b.ts = SDL_GetTicks(); e.b.win = window ? SDL_GetWindowID(window) : 1;
++    e.b.button = 1; e.b.state = 0; e.b.clicks = 1; e.b.x = sty_x < 0 ? 0 : sty_x; e.b.y = sty_y < 0 ? 0 : sty_y;
++    push_ev(&e); sty_btn = 0;
++}
+ /* DraStic ignores the absolute x/y of mouse events: it moves its stylus by the RELATIVE deltas (xrel/yrel),
+  * 1:1 in DS pixels, clamped to the bottom screen, starting from the centre (measured by logging where it
+  * draws its 32x32 cursor). So we track its stylus position and send exact deltas. On every touch-down we
+  * first pin it to (0,0) with a large negative move, then move to the target: no drift can accumulate. */
+-static int sty_x = -1, sty_y = -1;
+ static void stylus_move(int tx, int ty, int down, int resync) {
+     sdl_ev e; uint32_t wid = window ? SDL_GetWindowID(window) : 1, ts = SDL_GetTicks();
+     if (resync || sty_x < 0) {
+@@ -1367,7 +1375,7 @@ static void touch_emit(int down_change, int down, int x, int y, int xmax, int ym
+         memset(&e, 0, sizeof e);
+         e.b.type = down ? 0x401 : 0x402; e.b.ts = ts; e.b.win = wid; e.b.button = 1; e.b.state = down ? 1 : 0; e.b.clicks = 1;
+         e.b.x = lx; e.b.y = ly;
+-        push_ev(&e);
++        push_ev(&e); sty_btn = down ? 1 : 0;
+     }
+     st_touch++;
+ }
+diff --git a/src/menu.c b/src/menu.c
+index eec1552..cbcc62d 100644
+--- a/src/menu.c
++++ b/src/menu.c
+@@ -5,7 +5,9 @@
+ // Bottom panel: six tiles (Resume, Save, Load, Quick settings, DraStic menu, Quit game), then a page for each.
+ // Top panel: the game's last frame, dimmed, under a card with the game, this session's play time, the last save and
+ // RetroAchievements progress; while a save slot is picked, that slot's picture instead. D-pad, left stick and touch
+-// all work; A picks, B goes back, the menu button (or START) closes it.
++// all work; A picks, B goes back, the menu button (or START) closes it. A button or stick held when the menu opens
++// is released to DraStic when it closes, if the player let go while it was up (DraStic is stuck in SDL_PollEvent
++// and never sees that release). A press that only drove the menu is not passed on.
+ //
+ // Saving and loading press DraStic's own save/load state controls once the menu has closed (resume.c), with the
+ // slot file renamed or looked up for the slot picked here. A load first saves the current game to an undo file, so a
+@@ -82,6 +84,11 @@ void resume_quit_nosave(void);
+ int resume_on(void);
+ int resume_quit_pending(void);
+ int resume_loading(void);
++uint64_t resume_buttons_held(void);
++int resume_sync_buttons(uint64_t now);
++void resume_sync_axis(int axis, int value);
++void resume_sync_hat(int hat, int value);
++void dsflip_stylus_lift(void);
+ 
+ static long long now_ms(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000LL + t.tv_nsec / 1000000; }
+ 
+@@ -1257,6 +1264,7 @@ int menu_touch_event(int down_change, int down, int x, int y, int xmax, int ymax
+         if (touch_swallow) { if (down_change && !down) touch_swallow = 0; return 1; }   /* a touch from the menu, still down */
+         return 0;
+     }
++    if (down_change && !down) dsflip_stylus_lift();   /* the finger came up while DraStic was not reading events */
+     if (down_change && down) {
+         pthread_mutex_lock(&tm_);
+         if (tqn < 16) { tq[tqn][0] = x * pw[1] / (xmax + 1); tq[tqn][1] = y * ph[1] / (ymax + 1); tqn++; }
+@@ -1269,9 +1277,27 @@ int menu_touch_event(int down_change, int down, int x, int y, int xmax, int ymax
+ static int is_menu_btn(int b) { return b >= 0 && (b == btn_menu[0] || b == btn_menu[1]); }
+ static int held_dir, rep_dx, rep_dy; static long long rep_next;
+ static int axis_dir[2];
++/* joystick state DraStic already had when the menu opened, and what it became while the menu ate the events */
++static uint64_t joy_was, joy_now;
++static int16_t axis_last[8]; static uint8_t axis_dirty[8];
++static uint8_t hat_last[4], hat_dirty[4];
++static void note_joy(const uint8_t *e) {
++    uint32_t type; memcpy(&type, e, 4);
++    if (type == 0x603 || type == 0x604) {
++        int b = e[12];
++        if ((unsigned)b < 64) { if (type == 0x603) joy_now |= 1ULL << b; else joy_now &= ~(1ULL << b); }
++    } else if (type == 0x600) {
++        int ax = e[12]; int16_t v; memcpy(&v, e + 16, 2);
++        if ((unsigned)ax < 8) { axis_last[ax] = v; axis_dirty[ax] = 1; }
++    } else if (type == 0x602) {
++        int hat = e[12];
++        if ((unsigned)hat < 4) { hat_last[hat] = e[13]; hat_dirty[hat] = 1; }
++    }
++}
+ static void dir_press(int dx, int dy) { nav(dx, dy); held_dir = 1; rep_dx = dx; rep_dy = dy; rep_next = now_ms() + 380; }
+ static void dir_release(void) { held_dir = 0; }
+ static void handle_sdl(const uint8_t *e) {
++    note_joy(e);
+     uint32_t type; memcpy(&type, e, 4);
+     if (type == 0x100) {                            /* SDL_QUIT (SIGTERM: a shutdown, the menu's quit): the menu's own
+                                                      * poll took it from DraStic, which would never quit. Close and
+@@ -1345,6 +1371,8 @@ static void menu_run(int start) {
+     cpugov_menu(1);
+     open_ = 1; scr = SC_MAIN; sel_main = 0; held_dir = 0; axis_dir[0] = axis_dir[1] = 0; tqn = 0;
+     bri_dirty = 0; make_rows(); shaders_load(); sh_sel = sh_active;
++    joy_was = joy_now = resume_buttons_held();
++    memset(axis_dirty, 0, sizeof axis_dirty); memset(hat_dirty, 0, sizeof hat_dirty);
+     scan_slots(0);
+     load_recent();
+     grab_background();
+@@ -1371,6 +1399,17 @@ static void menu_run(int start) {
+         if (open_) redraw();
+         usleep(8000);
+     }
++    { uint8_t left[64], quit[64]; int q = 0;            /* a release queued as the menu closed */
++      while (poll_real(left)) {
++          uint32_t t; memcpy(&t, left, 4);
++          if (t == 0x100) { memcpy(quit, left, sizeof quit); q = 1; }   /* SDL_QUIT: DraStic must still get it */
++          else note_joy(left);
++      }
++      if (q) SDL_PushEvent(quit); }
++    { int n = resume_sync_buttons(joy_was & joy_now), ax = 0, ht = 0;
++      for (int i = 0; i < 8; i++) if (axis_dirty[i]) { resume_sync_axis(i, axis_last[i]); ax++; }
++      for (int i = 0; i < 4; i++) if (hat_dirty[i]) { resume_sync_hat(i, hat_last[i]); ht++; }
++      if (n || ax || ht) dsflip_log("[menu] synced input: %d buttons, %d axes, %d hats\n", n, ax, ht); }
+     if (sh_sel != sh_active) apply_shader();
+     if (bri_dirty & 4) want(-1, 0, bri[0]);           /* ROCKNIX's settings, as its own scripts keep them */
+     for (int k = 0; k < 2; k++) if (bri_dirty & (1 << k)) want(-1, bl_scr[k], bri[k]);
+diff --git a/src/resume.c b/src/resume.c
+index e8c03d5..dd4b661 100644
+--- a/src/resume.c
++++ b/src/resume.c
+@@ -55,6 +55,10 @@ static long long release_at;                          /* the frame to release it
+ static int btn_save = -1, btn_load = -1;
+ static int joy_id = -1;                               /* the SDL instance id of DraStic's joystick */
+ static int pq[4], pqn;                                /* presses waiting for the one before to be released */
++/* button/axis/hat events the in-game menu has to hand DraStic after it closes (menu.c). A press queue of its own,
++ * delivered before the save/load presses: the menu swallows SDL events while it is up. */
++static struct { uint32_t type; uint8_t a, c; int16_t v; } sq[80];
++static int sq_r, sq_w;
+ /* the in-game menu's save and load (menu.c): the slot file DraStic renames its save to goes to m_save_to, and its
+  * slot lookups during a load read m_load_from */
+ static char m_save_to[600], m_load_from[600], m_load_next[600], m_msg[96], m_msg2[160];
+@@ -211,8 +215,34 @@ void *SDL_JoystickOpen(int i) {
+     return j;
+ }
+ 
++/* buttons whose held-ness changed between was and now. btn[i] is the button, down[i] is 1 pressed / 0 released. */
++int resume_hold_edges(uint64_t was, uint64_t now, unsigned char *btn, unsigned char *down, int max) {
++    int n = 0;
++    if (!btn || !down || max <= 0) return 0;
++    for (int b = 0; b < 64 && n < max; b++) {
++        unsigned w = (unsigned)((was >> b) & 1u), d = (unsigned)((now >> b) & 1u);
++        if (w == d) continue;
++        btn[n] = (unsigned char)b; down[n] = (unsigned char)d; n++;
++    }
++    return n;
++}
++static void sq_push(uint32_t type, int a, int c, int v) {
++    int next = (sq_w + 1) % (int)(sizeof sq / sizeof sq[0]);
++    if (next == sq_r) { dsflip_log("[menu] input sync queue full\n"); return; }
++    sq[sq_w].type = type; sq[sq_w].a = (uint8_t)a; sq[sq_w].c = (uint8_t)c; sq[sq_w].v = (int16_t)v;
++    sq_w = next;
++}
+ /* SDL_PollEvent (dsflip.c) asks this first: a pressed or released control button, as SDL delivers them */
+ int resume_poll(void *ev) {
++    if (sq_r != sq_w) {                               /* a release (or axis/hat) the menu owed DraStic */
++        uint32_t type = sq[sq_r].type; uint8_t a = sq[sq_r].a, c = sq[sq_r].c; int16_t v = sq[sq_r].v;
++        sq_r = (sq_r + 1) % (int)(sizeof sq / sizeof sq[0]);
++        uint8_t *e = ev; memset(e, 0, 56);
++        int32_t which = joy_id >= 0 ? joy_id : 0;
++        memcpy(e, &type, 4); memcpy(e + 8, &which, 4); e[12] = a;
++        if (type == 0x600) memcpy(e + 16, &v, 2); else e[13] = c;   /* hat value, or button state */
++        return 1;
++    }
+     int b = -1, down = 0;
+     if (btn_press < 0 && pqn) { btn_press = pq[0]; memmove(pq, pq + 1, (size_t)--pqn * sizeof pq[0]); }
+     if (btn_release >= 0) {              /* one button at a time: the next press waits for this release */
+@@ -254,6 +284,24 @@ void resume_saw_event(const void *ev) {
+     else if (!combo_since) combo_since = now_ms();
+ }
+ 
++/* the in-game menu (menu.c) reads this when it opens and puts the held set back when it closes */
++uint64_t resume_buttons_held(void) { return held_btns; }
++/* DraStic only learns of releases it is shown. now is the set still held; anything in held_btns but not now
++ * gets a button-up. A button pressed only to drive the menu is not in now (the caller masks with the set from
++ * open), so it is not handed to the game. */
++int resume_sync_buttons(uint64_t now) {
++    unsigned char btn[64], down[64];
++    int n = resume_hold_edges(held_btns, now, btn, down, 64);
++    for (int i = 0; i < n; i++) sq_push(down[i] ? 0x603u : 0x604u, btn[i], down[i], 0);
++    held_btns = now;
++    { int held = exit_combo && btn_start >= 0 && (held_btns >> btn_start & 1) &&
++          ((btn_select >= 0 && (held_btns >> btn_select & 1)) || (btn_menu >= 0 && (held_btns >> btn_menu & 1)));
++      if (!held) combo_since = 0; }
++    return n;
++}
++void resume_sync_axis(int axis, int value) { if (axis >= 0 && axis < 16) sq_push(0x600, axis, 0, value); }
++void resume_sync_hat(int hat, int value) { if (hat >= 0 && hat < 4) sq_push(0x602, hat, value, 0); }
++
+ /* ---- quitting with a save ---- */
+ static void *save_thread(void *a) {
+     (void)a;
+diff --git a/tools/ut/t_hold_diff.c b/tools/ut/t_hold_diff.c
+new file mode 100644
+index 0000000..c7d6221
+--- /dev/null
++++ b/tools/ut/t_hold_diff.c
+@@ -0,0 +1,68 @@
++/* A direction or button held when the in-game menu opens has to be released to DraStic if the player let go
++ * while the menu had the event loop. Presses that only drove the menu must not be handed to the game.
++ * gcc -O2 -Wall -o /tmp/t_hold_diff tools/ut/t_hold_diff.c src/resume.c && /tmp/t_hold_diff */
++#include <assert.h>
++#include <stdint.h>
++#include <string.h>
++
++void dsflip_log(const char *fmt, ...) { (void)fmt; }
++void cpugov_boost(int ms) { (void)ms; }
++void dsflip_toast(const char *a, const char *b, unsigned c, int d) { (void)a; (void)b; (void)c; (void)d; }
++void audio_mute(int on) { (void)on; }
++volatile int dsflip_hold;
++
++int resume_hold_edges(uint64_t was, uint64_t now, unsigned char *btn, unsigned char *down, int max);
++void resume_start(void);
++void resume_saw_event(const void *ev);
++uint64_t resume_buttons_held(void);
++int resume_sync_buttons(uint64_t now);
++void resume_sync_axis(int axis, int value);
++void resume_sync_hat(int hat, int value);
++int resume_poll(void *ev);
++
++static void joy(unsigned char *ev, uint32_t type, int button) {
++    memset(ev, 0, 56);
++    memcpy(ev, &type, 4);
++    ev[12] = (unsigned char)button;
++    ev[13] = type == 0x603;
++}
++
++int main(void) {
++    resume_start();
++    unsigned char b[64], d[64];
++    assert(resume_hold_edges(0, 0, b, d, 64) == 0);
++    assert(resume_hold_edges(1, 0, b, d, 64) == 1 && b[0] == 0 && d[0] == 0);
++    assert(resume_hold_edges(0, 1ull << 63, b, d, 64) == 1 && b[0] == 63 && d[0] == 1);
++    uint64_t was = (1ull << 3) | (1ull << 10), now = (1ull << 10) | (1ull << 11);
++    int n = resume_hold_edges(was, was & now, b, d, 64);   /* the menu's mask: releases only */
++    assert(n == 1 && b[0] == 3 && d[0] == 0);
++    assert(resume_hold_edges(0, 0xff, b, d, 1) == 1);
++
++    unsigned char ev[56];
++    joy(ev, 0x603, 5);
++    resume_saw_event(ev);
++    joy(ev, 0x603, 9);
++    resume_saw_event(ev);
++    assert(resume_buttons_held() == ((1ull << 5) | (1ull << 9)));
++    was = resume_buttons_held();
++    now = (1ull << 9) | (1ull << 2);                        /* 5 released, 2 pressed only inside the menu */
++    assert(resume_sync_buttons(was & now) == 1);
++    assert(resume_buttons_held() == (1ull << 9));
++    memset(ev, 0, 56);
++    assert(resume_poll(ev) == 1);
++    uint32_t type; memcpy(&type, ev, 4);
++    assert(type == 0x604 && ev[12] == 5 && ev[13] == 0);
++    assert(resume_poll(ev) == 0);                           /* the menu press of button 2 is not delivered */
++
++    resume_sync_axis(1, -20000);
++    resume_sync_hat(0, 0);
++    assert(resume_poll(ev) == 1);
++    memcpy(&type, ev, 4);
++    int16_t v; memcpy(&v, ev + 16, 2);
++    assert(type == 0x600 && ev[12] == 1 && v == -20000);
++    assert(resume_poll(ev) == 1);
++    memcpy(&type, ev, 4);
++    assert(type == 0x602 && ev[12] == 0 && ev[13] == 0);
++    assert(resume_poll(ev) == 0);
++    return 0;
++}
+-- 
+2.56.0
+
+
+From cffe891639997b44d7ee38e9afe5cb2b88b063cf Mon Sep 17 00:00:00 2001
+From: Anthony Giacalone <anthony.giacalone@csulb.edu>
+Date: Mon, 16 Nov 2026 10:09:56 -0800
+Subject: [PATCH 6/7] tests: resume.c's host tests link on this line
+
+This line's src/resume.c also calls menu_hint, menu_is_open,
+menu_game_title, audio_hand_off and reads dsflip_stalled. The host
+tests from upstream (resume-keep-test, t_hold_diff) link resume.c alone
+and failed to link here. tools/ut/resume-stubs.c gives weak no-ops for
+them; build.yml runs both tests with it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LMsLD7zBPJ3YiKjVJB8fmn
+---
+ .github/workflows/build.yml | 4 +++-
+ tools/README.md             | 2 +-
+ tools/ut/resume-stubs.c     | 8 ++++++++
+ tools/ut/t_hold_diff.c      | 2 +-
+ 4 files changed, 13 insertions(+), 3 deletions(-)
+ create mode 100644 tools/ut/resume-stubs.c
+
+diff --git a/.github/workflows/build.yml b/.github/workflows/build.yml
+index ae7b727..21e5cf1 100644
+--- a/.github/workflows/build.yml
++++ b/.github/workflows/build.yml
+@@ -45,7 +45,9 @@ jobs:
+             llvm-nm -D --defined-only $L | grep -q " $s\$" || { echo "hook $s missing"; exit 1; }
+           done
+           sh -n runner/superdrastic-run && sh -n runner/superdrastic-update
+-          clang -O2 -Wall -Wextra -o /tmp/resume-keep-test tools/resume-keep-test.c src/resume.c -ldl -lpthread
++          clang -O2 -Wall -Wextra -o /tmp/resume-keep-test tools/resume-keep-test.c src/resume.c tools/ut/resume-stubs.c -ldl -lpthread
++          clang -O2 -Wall -o /tmp/t_hold_diff tools/ut/t_hold_diff.c src/resume.c tools/ut/resume-stubs.c -ldl -lpthread
++          /tmp/t_hold_diff
+           /tmp/resume-keep-test
+       - name: Package
+         run: sh package.sh
+diff --git a/tools/README.md b/tools/README.md
+index c82de61..4f600b7 100644
+--- a/tools/README.md
++++ b/tools/README.md
+@@ -14,5 +14,5 @@ Test and measurement tools, run on the device unless noted.
+ | `ramp.py` | Maps a stress-ROM run's presents to its levels |
+ | `shaders.sh`, `shbench.sh` | GPU time per shader on real frames (run `shaders.sh` on a PC with `RGDS_SSH`/`RGDS_HOST`; it pushes `build/shtest`, `shaders/` and `shbench.sh` to the device) |
+ | `gen-color-shaders.py` | Writes `ds-crisp-color` and `ds-grid-color` from `ds-crisp` and `ds-grid` (on a PC) |
+-| `resume-keep-test.c` | Host test: a quit-save leaves the previous resume file until the new one replaces it (`clang -O2 -o /tmp/resume-keep-test tools/resume-keep-test.c src/resume.c -ldl -lpthread`) |
++| `resume-keep-test.c` | Host test: a quit-save leaves the previous resume file until the new one replaces it (`clang -O2 -o /tmp/resume-keep-test tools/resume-keep-test.c src/resume.c tools/ut/resume-stubs.c -ldl -lpthread`) |
+ | `dev/` | The scripts used while bringing SuperDrastic up on the RG DS under ROCKNIX (they assume its paths) |
+diff --git a/tools/ut/resume-stubs.c b/tools/ut/resume-stubs.c
+new file mode 100644
+index 0000000..6627401
+--- /dev/null
++++ b/tools/ut/resume-stubs.c
+@@ -0,0 +1,8 @@
++/* No-op stand-ins for the rest of libsuperdrastic that this line's src/resume.c calls, for host tests that link
++ * resume.c alone (tools/resume-keep-test.c, tools/ut/t_hold_diff.c). Weak, so a test's own definition wins. */
++#define W __attribute__((weak))
++W volatile int dsflip_stalled;
++W int menu_is_open(void) { return 0; }
++W int menu_hint(const char *name, int times) { (void)name; (void)times; return 0; }
++W const char *menu_game_title(void) { return "test"; }
++W void audio_hand_off(void) {}
+diff --git a/tools/ut/t_hold_diff.c b/tools/ut/t_hold_diff.c
+index c7d6221..7b76303 100644
+--- a/tools/ut/t_hold_diff.c
++++ b/tools/ut/t_hold_diff.c
+@@ -1,6 +1,6 @@
+ /* A direction or button held when the in-game menu opens has to be released to DraStic if the player let go
+  * while the menu had the event loop. Presses that only drove the menu must not be handed to the game.
+- * gcc -O2 -Wall -o /tmp/t_hold_diff tools/ut/t_hold_diff.c src/resume.c && /tmp/t_hold_diff */
++ * clang -O2 -Wall -o /tmp/t_hold_diff tools/ut/t_hold_diff.c src/resume.c tools/ut/resume-stubs.c -ldl -lpthread && /tmp/t_hold_diff */
+ #include <assert.h>
+ #include <stdint.h>
+ #include <string.h>
+-- 
+2.56.0
+
+
+From 42fe54b90b5645f4162f6da487af78964b4b3984 Mon Sep 17 00:00:00 2001
+From: Anthony Giacalone <anthony.giacalone@csulb.edu>
+Date: Mon, 16 Nov 2026 10:09:56 -0800
+Subject: [PATCH 7/7] 0.5.0-beta.1-rocknixds.13: five upstream fixes for
+ ROCKNIXDS
+
+From upstream's branches, -x, conflicts resolved for our line:
+- quit-save keeps the previous resume state when the new one does not
+  finish (the early unlink is gone; our CPU boost stays);
+- a control released while the in-game menu is open is released in the
+  game (the menu's drain loop hands SDL_QUIT back, so a quit sent with
+  the menu open still reaches DraStic);
+- realpath's buffer is PATH_MAX, so a fortified build does not abort;
+- NNDDSS shaders: SCREEN_RES_SCALE from the frame's width (BL#76);
+- Retro tiles without the blown-out half.
+
+Not taken, already on this line: 457ac28 (our 5e14c95), 8ae97f7 (our
+af8944a and the .12 quit handling), 452a9fd (hr_recip covers 1023
+lines). 425a416 follows a BananaOS-only setting.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LMsLD7zBPJ3YiKjVJB8fmn
+---
+ VERSION | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/VERSION b/VERSION
+index 45c9cf9..caef6e3 100644
+--- a/VERSION
++++ b/VERSION
+@@ -1 +1 @@
+-0.5.0-beta.1-rocknixds.12
++0.5.0-beta.1-rocknixds.13
+-- 
+2.56.0
+
