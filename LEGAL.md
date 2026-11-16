@@ -1,10 +1,11 @@
 # ROCKNIXDS: terms of use and legal notice
 
-**Version 1** · 6 October 2026
+**Version 2** · 16 November 2026
 
 These terms cover ROCKNIXDS (the frontend, SuperDrastic/libdsflip and the other tools in this repository) and
-ROCKNIXDS Bank & Trade (the app in `bank/`). They are written in plain English. Please read them before you use
-ROCKNIXDS.
+ROCKNIXDS Bank & Trade (the app in `bank/`), as published by the fork at https://github.com/agiacalone/ROCKNIXDS,
+which carries ROCKNIXDS on from JorreFog's original. They are written in plain English. Please read them before you
+use ROCKNIXDS.
 
 ## 1. In short
 
@@ -80,7 +81,7 @@ If you hold rights in something included in or shown by ROCKNIXDS and believe it
 ## 6. Your data
 
 ROCKNIXDS has no accounts, no advertising and no analytics. The developers do not receive any data about you or your
-games, except in the optional case below.
+games.
 
 - **Trading** (Bank & Trade): when you open a trade room or a lobby, the name you chose, your handheld's ID (made from
   a key created on your handheld) and the Pokémon you list are announced to every device on your local network.
@@ -88,11 +89,6 @@ games, except in the optional case below.
   directly between the devices and is not sent to the developers. Your handheld remembers the handhelds you traded with
   in `trainers.json` in its data folder; you can delete that file, and the identity key next to the settings, at any
   time.
-- **Performance logs** (ROCKNIXDS menu, optional): only if you answer yes when asked, logs of game sessions (the game's
-  name, frame rate, clock speeds, temperature, battery, and a random ID for your handheld, with secrets removed) are
-  sent through ntfy.sh and published openly in this repository on GitHub, to improve performance. They are not used for
-  anything else. You can switch this off at any time in the menu; to have published logs removed, open an issue
-  (section 11).
 - Features you choose to use that connect to other services (for example RetroAchievements, or the download of box
   art) are subject to those services' own terms and privacy policies.
 
@@ -132,5 +128,8 @@ the law anyway; they add no restriction on your rights under those licences.
 
 ## 11. Contact
 
-Questions, rights holders' notices and requests about published logs: open an issue at
-https://github.com/JorreFog/ROCKNIXDS/issues.
+Questions and rights holders' notices: open an issue at https://github.com/agiacalone/ROCKNIXDS/issues.
+
+Earlier versions of these terms described optional performance logs. This fork does not collect them: the RG DS line's
+upload was removed in 1.6.3.2, and the RG DS Plus line never had it. Requests about logs that the original project
+already published go to https://github.com/JorreFog/ROCKNIXDS/issues.
