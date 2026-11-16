@@ -76,6 +76,27 @@ def ereaderds_files(v):
 EREADERDS_EXEC = ("Ports/eReaderDS.sh", "Ports/eReaderDS/launch.sh", "Ports/eReaderDS/runtime/love.aarch64")
 
 
+def gbads_files(v):
+    """GBA DS's release zip, as kyannon/gba-ds lays it out (the parts that matter here): the Ports entry, the gba-ds
+    folder the Store installs, and the line the Store reads the version from"""
+    icon = (THEME / "icons" / "store.png").read_bytes()
+    return {
+        "GBA DS.sh": b'#!/bin/bash\nD="$(cd "$(dirname "$0")" && pwd)"\nexec bash "$D/gba-ds/launch.sh" "$@"\n',
+        "images/GBA DS.png": icon,
+        "gba-ds/gba-ds": b"\x7fELF gba-ds",
+        "gba-ds/launch.sh": b"#!/bin/bash\necho playing\n",
+        "gba-ds/es-play.sh": b"#!/bin/bash\n",
+        "gba-ds/screens.sh": b"#!/bin/bash\n",
+        "gba-ds/gba-ds.cfg": b"rom_dir = /storage/roms/gba\n",
+        "gba-ds/images/icon.png": icon,
+        "gba-ds/licenses/README.txt": ("GBA DS %s is free software under the GNU General Public License, version 3 "
+                                       "only (GBA-DS-LICENSE.txt).\n" % v).encode(),
+    }
+
+
+GBADS_EXEC = ("GBA DS.sh", "gba-ds/gba-ds", "gba-ds/launch.sh")
+
+
 class Sandbox:
     def __init__(self, base, tiles=True, device="rgds", rocknixds="1.6.1"):
         self.base = Path(base)
@@ -189,6 +210,19 @@ class Sandbox:
         f.write_text(json.dumps(self.releases[repo]))
         return p
 
+    def publish_gbads(self, v):
+        """a release as kyannon/gba-ds publishes one: tag v<version>, gba-ds-v<version>-linux-aarch64.zip"""
+        repo, tag, asset = "kyannon/gba-ds", "v" + v, "gba-ds-v%s-linux-aarch64.zip" % v
+        p = self.dl / tag / asset
+        sha = zip_package(str(p), gbads_files(v), GBADS_EXEC)
+        self.releases.setdefault(repo, []).insert(0, {
+            "tag_name": tag, "draft": False, "prerelease": False, "body": "## GBA DS %s\n\n- A new game\n" % v,
+            "assets": [{"name": asset, "size": p.stat().st_size, "digest": "sha256:" + sha}]})
+        f = self.rel / (repo + ".json")
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps(self.releases[repo]))
+        return p
+
     def legacy_dodakvarter(self, v="0.2.0"):
         """Döda Kvarter as ROCKNIXDS's install.sh puts it: the game, its data, its tile"""
         d = self.storage / ".config" / "rocknixds" / "dodakvarter"
@@ -223,6 +257,7 @@ if __name__ == "__main__":
     s.publish_dodakvarter("0.2.0")
     s.publish_dodakvarter("0.3.0")
     s.publish_bank("0.1.0")
+    s.publish_gbads("1.5.3")
     s.publish_hello("1.0.0")
     for k, v in s.env().items():
         if k.startswith("RNDS_STORE_"):
