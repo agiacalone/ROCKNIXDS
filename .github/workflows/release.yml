@@ -3,6 +3,9 @@
 # Plus's release and never becomes "latest": the 1.5 betas' updaters read releases/latest as the RG DS's release.
 # A release whose notes title says "beta" (1.6.3.2: a fork release not yet run on an RG DS) is a pre-release too, so
 # the stable channel (install.sh's and rocknixds-update's latest_release skip pre-releases) doesn't offer it.
+# Then the line's beta branch (plus-beta for a -plus tag, beta otherwise) follows the release: .github/beta-follow.sh
+# fast-forwards it to the tag, leaves it when it already holds the release, and fails when the two have split, so the
+# Beta update channel never offers an older build than the release.
 name: release
 on:
   push:
@@ -16,6 +19,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # every branch's history: beta-follow.sh compares the beta branch with the tag
       - name: Notes
         id: notes
         run: |
@@ -35,3 +40,6 @@ jobs:
             docs/img/demo-light.webp
             docs/img/demo-dark.webp
             docs/img/pixel-*.png
+      - name: The beta channel follows the release
+        if: steps.notes.outputs.skip != '1'
+        run: sh .github/beta-follow.sh "$GITHUB_REF_NAME"

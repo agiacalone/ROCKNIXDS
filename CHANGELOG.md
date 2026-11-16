@@ -13,6 +13,12 @@ handheld.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Please report problems at
 <https://github.com/agiacalone/ROCKNIXDS/issues>.
 
+## Unreleased
+
+### Fixed
+- The Beta update channel follows each release, so it never offers an older build. On the RG DS Plus it had stayed at
+  1.6.4.1-plus since October; it was moved to 1.6.4.7-plus on 2026-11-16, and each release now moves it.
+
 ## 1.6.4.7-plus (RG DS Plus) · 2026-11-16
 
 ### Added
