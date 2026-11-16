@@ -118,6 +118,45 @@
    }
   },
   {
+   "id": "gbads",
+   "name": "GBA DS",
+   "tile": "GBA DS",
+   "kind": "app",
+   "developer": "kyannon",
+   "genre": "Emulator",
+   "players": "1",
+   "releasedate": "20261013T000000",
+   "accent": "#5140b9",
+   "summary": "Game Boy Advance on both screens: the game on one, its own map on the other.",
+   "description": "A Game Boy Advance emulator made for dual-screen handhelds, built on mGBA. The game plays on the top screen; for 37 games (Castlevania, Metroid, Zelda, Golden Sun, Advance Wars, Mario Kart and more) the bottom screen shows the game's own map, race HUD or unit intel and keeps it current as you play, the way the DS Castlevanias do. It finds the games in /storage/roms/gba (the games-roms share's gba folder) by itself and lists the ones it has second-screen support for; show_all = 1 in its gba-ds.cfg lists every game (the others play on one screen). HOME or a tap on the bottom screen opens its menu: save states, rewind, cheats, display options, Close GBA DS. Its battery saves are the Game Boy Advance list's own, so a game goes on from the same save in GBA DS and in RetroArch; its save states and settings stay when the app is updated or removed. Made by kyannon (free software, GPL-3.0); it updates itself too, and the Store follows its releases.",
+   "icon": "apps/gbads/icon.png",
+   "screenshots": ["apps/gbads/screen.png"],
+   "devices": ["rgds", "rgds-plus"],
+   "requires": { "rocknixds": "1.6" },
+   "release": {
+    "github": "kyannon/gba-ds",
+    "tag_prefix": "v",
+    "asset": "gba-ds-v{version}-linux-aarch64.zip"
+   },
+   "package": {
+    "root": "gba-ds",
+    "dest": "/storage/.config/rocknixds/gbads",
+    "check": "gba-ds",
+    "keep": ["states", "gba-ds.cfg", "data-folder.cfg", "cheats", "logos", "overlays", "patches", "screenshots", "bug-reports"],
+    "executable": ["gba-ds", "launch.sh", "es-play.sh", "screens.sh"],
+    "version_file": "licenses/README.txt",
+    "version_match": "GBA DS ([0-9][0-9.]*) is free software"
+   },
+   "menu": {
+    "system": "gbads",
+    "folder": "/storage/.config/rocknixds/apps/gbads",
+    "entry": "GBADS.sh",
+    "launch": "launch.sh",
+    "ports": false,
+    "media": { "image": "images/icon.png" }
+   }
+  },
+  {
    "id": "store",
    "name": "ROCKNIXDS Store",
    "tile": "Store",

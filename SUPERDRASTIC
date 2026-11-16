@@ -67,4 +67,19 @@
 # alternating with .11 (0/6/2 dropped per 30 s against .11's 2/8/0); DSFLIP_LOWLAT=1 20 dropped per 30 s (rougher on
 # the Plus, as BananaOS notes; off by default); DSFLIP_AUDIO_WAIT=1 2 dropped, 0 underruns; a SIGTERM with the menu
 # open logged "quit asked while open" and the menu was back in 1 s.
-0.5.0-beta.1-rocknixds.12 a2d253d095007780b12e4d260e6fa7b402b791be9a8540336b0f94f2d7ddcba2
+# 0.5.0-beta.1-rocknixds.13 (ROCKNIXDS 1.6.4.7-plus, 2026-11-16): .12 plus five fixes from upstream SuperDrastic's
+# branches (cherry-pick -x; agiacalone/SuperDrastic branch rocknixds-13; source: dsflip/superdrastic-0.5.0-beta.1-
+# rocknixds.13.patch, git format-patch rocknixds-12..rocknixds-13). A control released while the in-game menu is open
+# is released in the game (ddd892b; the menu's drain loop also hands SDL_QUIT back to DraStic); a quit-save that
+# doesn't finish keeps the previous resume state (33a798c); realpath's buffer is PATH_MAX, so a fortified build does
+# not abort (296c273); NNDDSS shaders scale from the frame's width (1447d42, BananaLinux #76) and Retro tiles lose the
+# blown-out half (87e4551). tools/ut/resume-stubs.c lets upstream's host tests link this line's resume.c. ddd892b and
+# 296c273 came from upstream's automated-agent branches, never merged or released there. Not taken, already on this
+# line: 457ac28 (our 5e14c95), 8ae97f7 (our af8944a and .12's quit handling), 452a9fd (hr_recip covers 1023 lines);
+# 425a416 follows a BananaOS-only setting. Checked: host tests (resume-keep-test, t_hold_diff,
+# realpath-fortify-test, conv-dfx-test) pass; on an RG DS Plus, tools/smoke.sh on Mario Kart DS (60.0 presents/s, 8
+# dropped in 30 s, inside .11/.12's 0-8, 0 underruns), all 29 shaders through tools/shtest at 1x and 2x, and a
+# SIGTERM with the menu open (DSFLIP_MENU_TEST=1) quit the game in 1 s with ES back. By hand on Mario Kart DS: A and
+# Left held as the menu opened, let go in the menu, then Resume: the kart stopped accelerating and turning, and the
+# log showed "[menu] synced input: 1 buttons".
+0.5.0-beta.1-rocknixds.13 e0752ff595b9016404f8fe639c41b5c5dfce2e5710dde8cc42f45a750ee4ebba
