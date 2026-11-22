@@ -1,0 +1,15 @@
+#!/bin/sh
+# ROCKNIXDS: put SuperDrastic back after ROCKNIX has reset DraStic's folder. ROCKNIX's "factoryreset standalone"
+# deletes /storage/.config/drastic, and libdsflip with it, so DS games would start on stock DraStic. ROCKNIX
+# 20261101's post-update runs it once on RK3566 handhelds (when /storage/.config/.inputplumber_migrated is missing),
+# at the first boot after the update. ROCKNIX runs /storage/.config/autostart after its own steps, so this hook sees
+# the reset in the same boot. It runs before ES; the reinstall waits for the network in its own unit.
+RD=${ROCKNIXDS_STATE:-/storage/.config/rocknixds}
+DRASTIC=${ROCKNIXDS_DRASTIC:-/storage/.config/drastic}
+UPDATE=${ROCKNIXDS_UPDATE:-$RD/rocknixds-update}
+[ -s "$RD/installed-id" ] || exit 0                 # ROCKNIXDS isn't installed
+[ -e "$RD/no-dsflip" ] && exit 0                    # installed with --no-dsflip: no libdsflip is expected
+[ -e "$DRASTIC/dsflip/libdsflip.so" ] && exit 0     # nothing was reset
+[ -x "$UPDATE" ] || exit 0
+"$UPDATE" repair
+exit 0

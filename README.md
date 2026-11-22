@@ -17,7 +17,7 @@ Anbernic RG DS and RG DS Plus on ROCKNIX.</b></p>
 >   it over ssh on stock ROCKNIX, and `install.sh --uninstall` takes the device back to it. ROCKNIX's other
 >   systems, saves and services stay as they are.
 > - **It follows upstream's last releases** (1.6.3 on the RG DS, 1.6.4 on the RG DS Plus) with fixes added. Fork
->   releases add a fourth number: 1.6.3.4, 1.6.4.7-plus.
+>   releases add a fourth number: 1.6.3.5, 1.6.4.8-plus.
 > - **The Store, Döda Kvarter and Bank & Trade come from this fork,** so they keep working whatever happens
 >   upstream.
 > - **BananaOS features that suit ROCKNIX are being brought over,** credited to BananaOS (MIT).
@@ -251,6 +251,10 @@ RG DS Plus.
   releases or beta), and checks for and installs updates. On a Plus, stable is the newest `-plus` release and beta
   is the `plus-beta` branch, never an RG DS build. The menu says if an update fails. ROCKNIX's own OS updates are
   hidden: a new ROCKNIX can need a new ROCKNIXDS.
+- **It repairs itself after a ROCKNIX reset.** ROCKNIX's "factoryreset standalone" deletes DraStic's folder, and
+  SuperDrastic with it. ROCKNIX 20261101 runs it once, at the first start after updating from an older ROCKNIX.
+  At the next start, ROCKNIXDS sees that SuperDrastic is missing and installs the same version again once Wi-Fi is
+  up. The menu says when it is done. Saves are not touched; DraStic options you changed yourself need setting again.
 - **Settings that break ROCKNIXDS are gone from the menus.** That covers the dual-screen layout options, the CPU/GPU
   governors, the GPU driver, video mode and rotation, DTB overlays, the developer options, factory reset, the
   emulator-config reset, and the DS system's emulator choice. For development: `touch

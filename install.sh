@@ -287,7 +287,7 @@ if [ $UNINSTALL = 1 ]; then
     rm -rf $DRASTIC/dsflip
     [ -f $BACKUP/.shaders-added ] && while read -r b; do rm -f "$DRASTIC/shaders/$b"; done < $BACKUP/.shaders-added
     [ -e $BACKUP/.esf-created ] && rm -f $ESF $ESF.rocknixds-old
-    rm -f /storage/.config/autostart/rocknixds-es-features
+    rm -f /storage/.config/autostart/rocknixds-es-features /storage/.config/autostart/rocknixds-repair
     [ -e $BACKUP/.threaded-3d-set ] && { sed -i '/^nds\.threaded_3d=/d' $SYSCFG 2>/dev/null; rm -f $BACKUP/.threaded-3d-set; }
     # ROCKNIX's own mako-notify again (the volume indicator stand-in, see dsflip/device/mako-notify.sh)
     grep -q " /usr/bin/mako-notify " /proc/mounts && umount /usr/bin/mako-notify 2>/dev/null
@@ -761,6 +761,13 @@ say "Locking the settings that would break ROCKNIXDS; ROCKNIXDS updates"
 RD=/storage/.config/rocknixds
 mkdir -p $RD
 cp "$SRC/dsflip/device/rocknixds-update" $RD/ && chmod +x $RD/rocknixds-update
+# The repair hook: when ROCKNIX resets DraStic's folder (its factoryreset standalone; 20261101's post-update runs it
+# once), libdsflip goes with it, and at the next boot the hook installs this release again (rocknixds-update repair).
+# --no-dsflip is recorded so that a missing libdsflip isn't taken for a reset.
+if [ $DSFLIP_ON = 1 ]; then rm -f $RD/no-dsflip; else touch $RD/no-dsflip; fi
+mkdir -p /storage/.config/autostart
+cp "$SRC/dsflip/device/autostart-rocknixds-repair" /storage/.config/autostart/rocknixds-repair
+chmod +x /storage/.config/autostart/rocknixds-repair
 themes_allow > $RD/themes.allow
 [ -f $SYSCFG ] && backup_once $SYSCFG
 [ -f $SYSCFG ] && sed -i '/^nds\(\[.*\]\)\{0,1\}\.\(emulator\|core\)=/d' $SYSCFG       # a per-game RetroArch/melonDS choice
