@@ -23,6 +23,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Ple
 - The Beta update channel follows each release, so it never offers an older build. On the RG DS Plus it had stayed at
   1.6.4.1-plus since October; it was moved to 1.6.4.7-plus on 2026-11-16, and each release now moves it.
 
+## 1.6.3.5 (RG DS, beta) · 2026-11-22
+
+### Fixed
+- **SuperDrastic comes back after ROCKNIX 20261101's update.** That update's first start resets every standalone
+  emulator's settings folder, DraStic's included, which removed SuperDrastic. DS games then ran on stock DraStic.
+  Now ROCKNIXDS notices at start-up, installs the same version again once Wi-Fi is up, and says so in the menu.
+  Saves are not touched. DraStic options you changed yourself need setting again.
+- The Beta update channel follows each release, so it never offers an older build.
+
 ## 1.6.4.7-plus (RG DS Plus) · 2026-11-16
 
 ### Added
