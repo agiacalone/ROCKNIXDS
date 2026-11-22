@@ -4,6 +4,8 @@
 #   check    one line: "UPDATE <what>" when the channel has something newer than what's installed, else a message
 #   install  runs the channel's installer in its own unit (it stops the menu and brings it back when it's done)
 #   notify   check, and pop up a notification in the menu once per new update (the timer; off with the menu switch)
+#   repair   install again exactly what's installed (installed-id), in its own unit, once the network is up: started
+#            at boot by the rocknixds-repair autostart hook when ROCKNIX has reset DraStic's folder
 # Channel: rocknixds.channel in system.cfg, "stable" (the latest release for this handheld) or "beta". Releases
 # come in pairs from 1.5 on: vX.Y for the RG DS and vX.Y-plus for the RG DS Plus (pre-releases are betas), so
 # stable is the newest release whose tag is this handheld's. The menu only stores those
@@ -129,6 +131,54 @@ install)
         exit 1" || { echo "COULDN'T START THE UPDATE"; exit 1; }
     echo "STARTED"
     ;;
+repair)
+    # The same release or commit again, not the channel's newest: a repair is no time to change versions. A local
+    # install (RGDS_SRC) has nothing to download, so it is only reported.
+    id=$(cat $STATE/installed-id 2>/dev/null)
+    case "$id" in ""|unknown|local) echo "NOTHING TO REPAIR FROM: installed-id is '$id'"; exit 1 ;; esac
+    systemctl is-active -q rocknixds-update && { echo "AN UPDATE IS ALREADY RUNNING"; exit 1; }
+    # The installer replaces this file while it runs, so the unit runs a copy. --no-block: the hook runs inside
+    # ROCKNIX's autostart, which the unit's default dependencies would otherwise wait for.
+    RUN=${ROCKNIXDS_REPAIR_RUN:-/tmp/rocknixds-repair.sh}
+    cp "$0" $RUN || { echo "COULDN'T START THE REPAIR"; exit 1; }
+    systemd-run --quiet --no-block --unit=rocknixds-update --collect sh $RUN repair-run "$id" "$(branch)" ||
+        { echo "COULDN'T START THE REPAIR"; exit 1; }
+    echo "STARTED"
+    ;;
+repair-run)
+    # (the unit) wait up to 10 minutes for the network, as Wi-Fi joins around the time the menu starts, and up to 3
+    # more for the menu, then install; the menu says what happened either way.
+    id=$2 B=$3 LOG=/storage/rocknixds-update.log
+    say() {
+        for i in $(seq 1 90); do curl -fs -m 2 localhost:1234/isIdle >/dev/null 2>&1 && break; sleep 2; done
+        curl -fs --max-time 5 -X POST --data-binary "$1" http://localhost:1234/notify >/dev/null 2>&1
+    }
+    echo "rocknixds-update: DraStic's folder was reset by ROCKNIX; installing $id again" > $LOG
+    i=0; until curl -fsS -m 5 -o /dev/null https://api.github.com/ 2>/dev/null; do
+        i=$((i + 1))
+        if [ $i -ge 120 ]; then
+            echo "rocknixds-update: no network, nothing installed" >> $LOG
+            say "ROCKNIX reset DraStic, and SuperDrastic could not be put back without a network. Turn on Wi-Fi and restart, or reinstall from Updates & downloads > ROCKNIXDS."
+            rm -f "$0"; exit 1
+        fi
+        sleep 5
+    done
+    for i in $(seq 1 90); do curl -fs -m 2 localhost:1234/isIdle >/dev/null 2>&1 && break; sleep 2; done
+    # the installer won't run during a DS game (on stock DraStic until this finishes): wait for it to end
+    while systemctl is-active -q dsflip-game.service 2>/dev/null; do sleep 10; done
+    if curl -fsSL --max-time 120 -o /tmp/rocknixds-install.sh https://raw.githubusercontent.com/$REPO/$id/install.sh &&
+       RGDS_BRANCH=$B RGDS_REF=$id sh /tmp/rocknixds-install.sh >> $LOG 2>&1; then
+        rm -f /tmp/rocknixds-install.sh "$0"
+        msg="ROCKNIX reset DraStic during its update. ROCKNIXDS has put SuperDrastic back. Your saves are safe; DraStic options you changed yourself need setting again."
+        # a ROCKNIX update also replaces the device tree, so the 60 Hz timing was just written again
+        grep -q "applied; reboot" $LOG && msg="$msg Restart once to bring back the 60 Hz screens."
+        say "$msg"
+        exit 0
+    fi
+    echo "rocknixds-update: the install of $id failed" >> $LOG
+    say "ROCKNIX reset DraStic, and putting SuperDrastic back did not finish: see /storage/rocknixds-update.log"
+    rm -f "$0"; exit 1
+    ;;
 *)
-    echo "usage: rocknixds-update check|install|notify" >&2; exit 2 ;;
+    echo "usage: rocknixds-update check|install|notify|repair" >&2; exit 2 ;;
 esac
